@@ -1,0 +1,195 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<seiscomp>
+	<plugin name="Mw(spec)">
+		<extends>global</extends>
+		<description>
+		Spectral moment magnitude Mw(spec): per-station moment magnitude from a
+		Brune omega-square fit of the displacement spectrum. Port of the Seisan
+		SPEC/AUTOMAG algorithm (L. Ottemoeller). Provides the amplitude
+		processor (spectral fit, output Omega0 in nm*s with the corner frequency
+		as the amplitude period) and the magnitude processor (Omega0 -> seismic
+		moment -> Mw).
+		</description>
+		<configuration>
+			<!-- ===== Shared model + phase (global module config) ========== -->
+			<!-- These are read from the module configuration (not bindings) and
+			     are used by both the amplitude and magnitude processors, so they
+			     appear here under "Modules -> global". -->
+			<group name="magnitudes">
+				<group name="Mw(spec)">
+					<parameter name="model" type="list:string">
+						<description>
+						Layered spectral velocity/attenuation/density model, one
+						list entry per depth layer. Each entry is eight
+						whitespace-separated numbers:
+						"depth[km] vp[km/s] vs[km/s] Qp0 Qp_alpha Qs0 Qs_alpha density[g/cm^3]".
+						Values are linearly interpolated to the source depth
+						(Seisan get_att_vel). Used by the amplitude processor (Q
+						columns) and the magnitude processor (velocity/density).
+						Example (from SEISAN.DEF):
+						"3.0 5.8 3.2 500 0.7 400 0.7 2.6", "15.0 6.8 3.9 500 0.7 400 0.7 2.9".
+						If unset, a single layer (vp=6.0, vs=3.5, density=3.0, no
+						Q correction) is used.
+						</description>
+					</parameter>
+					<parameter name="phase" type="string" default="P" values="P,S">
+						<description>
+						Seismic phase whose spectrum is analysed: "P" (vertical
+						component) or "S" (horizontal). Shared by both processors.
+						</description>
+					</parameter>
+					<!-- Scalar single-layer model (used only when 'model' is unset).
+					     The simplest way to set a uniform, regionally-calibrated
+					     attenuation and source velocity/density. For RELIABLE Mw,
+					     calibrate Q0/Qalpha to your network's paths (the analogue
+					     of Seisan CODAQ/QLG); the generic default Q0=0 applies no
+					     attenuation correction and is only adequate at short range. -->
+					<parameter name="Q0" type="double" default="0">
+						<description>
+						Uniform quality factor Q0 in Q(f)=Q0*f^Qalpha (0 = no
+						anelastic attenuation correction). REGION-DEPENDENT — set
+						this for reliable Mw. Ignored if 'model' (layered) is set.
+						</description>
+					</parameter>
+					<parameter name="Qalpha" type="double" default="0">
+						<description>Frequency exponent in Q(f)=Q0*f^Qalpha (e.g. 0.7). Ignored if 'model' is set.</description>
+					</parameter>
+					<parameter name="vp" type="double" default="6.0" unit="km/s">
+						<description>Source P velocity (single-layer scalar model). Ignored if 'model' is set.</description>
+					</parameter>
+					<parameter name="vs" type="double" default="3.5" unit="km/s">
+						<description>Source S velocity (single-layer scalar model). Ignored if 'model' is set.</description>
+					</parameter>
+					<parameter name="density" type="double" default="3.0" unit="g/cm^3">
+						<description>Source density (single-layer scalar model). Ignored if 'model' is set.</description>
+					</parameter>
+				</group>
+			</group>
+
+			<!-- ============================ Amplitude ===================== -->
+			<extend-struct type="GlobalAmplitudeProfile" match-name="Mw(spec)">
+				<description>
+				Spectral measurement parameters for Mw(spec). Note: the shared
+				spectral model (model) and the phase are configured once in the
+				magnitude profile magnitudes.Mw(spec) and used by both processors.
+				</description>
+				<parameter name="signalPreTime" type="double" default="1.0" unit="s">
+					<description>Window lead before the phase onset.</description>
+				</parameter>
+				<parameter name="signalDuration" type="double" default="25.0" unit="s">
+					<description>Signal window length after the phase onset.</description>
+				</parameter>
+				<parameter name="noiseGap" type="double" default="1.0" unit="s">
+					<description>Gap between the noise and signal windows.</description>
+				</parameter>
+				<parameter name="fmin" type="double" default="0.0" unit="Hz">
+					<description>
+					Fixed lower frequency for the fit. 0 enables automatic band
+					selection from the signal-to-noise spectrum.
+					</description>
+				</parameter>
+				<parameter name="fmax" type="double" default="0.0" unit="Hz">
+					<description>
+					Fixed upper frequency for the fit. 0 enables automatic band
+					selection (capped at samplingRate/2.5).
+					</description>
+				</parameter>
+				<parameter name="nfreq" type="int" default="100">
+					<description>Number of log-spaced spectral samples used for the fit.</description>
+				</parameter>
+				<parameter name="minSNR" type="double" default="2.0">
+					<description>Minimum spectral signal-to-noise ratio to accept the measurement.</description>
+				</parameter>
+				<parameter name="maxResidual" type="double" default="1.0">
+					<description>Maximum Brune-fit residual to accept the measurement.</description>
+				</parameter>
+				<parameter name="calibration" type="double" default="0.0">
+					<description>
+					Additive log10 calibration of the spectral flat level, used to
+					match the absolute Omega0 level of a reference (e.g. Seisan).
+					</description>
+				</parameter>
+				<parameter name="taper" type="boolean" default="true">
+					<description>Apply a cosine taper before the FFT.</description>
+				</parameter>
+				<parameter name="combiner" type="string" default="vector_sum" values="vector_sum,average,geometric_mean,max,min">
+					<description>
+					For phase = S only: how to combine the two horizontal
+					components' Omega0 into one station measurement. vector_sum
+					(default) = sqrt(N^2 + E^2), the total horizontal S-wave
+					motion (recommended); average; geometric_mean = sqrt(N*E);
+					max; min. Ignored for phase = P (vertical only).
+					</description>
+				</parameter>
+				<parameter name="kappaP" type="double" default="0.01" unit="s">
+					<description>Near-surface attenuation kappa for P.</description>
+				</parameter>
+				<parameter name="kappaS" type="double" default="0.02" unit="s">
+					<description>Near-surface attenuation kappa for S.</description>
+				</parameter>
+				<parameter name="qCorner" type="double" default="0.0" unit="Hz">
+					<description>
+					Q corner frequency. 0 selects the power-law Q(f)=Q0*f^alpha;
+					a positive value selects Q(f)=Q0*(1+(f/qCorner)^alpha).
+					</description>
+				</parameter>
+				<parameter name="gridF" type="int" default="100">
+					<description>Grid nodes along corner frequency in the fit.</description>
+				</parameter>
+				<parameter name="gridOm" type="int" default="100">
+					<description>Grid nodes along the flat level in the fit.</description>
+				</parameter>
+				<parameter name="gridLoops" type="int" default="5">
+					<description>Zoom iterations of the grid search.</description>
+				</parameter>
+				<parameter name="dkappa" type="double" default="0.0">
+					<description>If &gt;0, also search a delta-kappa in {-dkappa,0,+dkappa}.</description>
+				</parameter>
+				<parameter name="norm" type="double" default="1.0">
+					<description>Residual norm of the fit (Seisan uses 1 = L1).</description>
+				</parameter>
+			</extend-struct>
+
+			<!-- ============================ Magnitude ===================== -->
+			<extend-struct type="GlobalMagnitudeProfile" match-name="Mw(spec)">
+				<description>
+				Moment-magnitude parameters for Mw(spec). The shared spectral
+				model and phase are configured under "Modules -> global"
+				(magnitudes.Mw(spec).model / .phase).
+				</description>
+				<parameter name="radiation" type="double" default="0.6">
+					<description>Average radiation-pattern coefficient (Seisan uses 0.6 for P and S).</description>
+				</parameter>
+				<parameter name="freeSurface" type="double" default="2.0">
+					<description>Free-surface amplification factor (Seisan uses 2.0).</description>
+				</parameter>
+				<parameter name="geoDepth1" type="double" default="50.0" unit="km">
+					<description>Top of the body-to-surface-wave geometric-spreading transition (S only).</description>
+				</parameter>
+				<parameter name="geoDepth2" type="double" default="100.0" unit="km">
+					<description>Bottom of the body-to-surface-wave geometric-spreading transition (S only).</description>
+				</parameter>
+				<parameter name="herkijDistance" type="double" default="100.0" unit="km">
+					<description>Epicentral distance of the Herrmann-Kijko spreading transition (S only).</description>
+				</parameter>
+					<parameter name="minimumDistance" type="double" default="0" unit="deg">
+						<description>Reject station magnitudes closer than this epicentral distance.</description>
+					</parameter>
+					<parameter name="maximumDistance" type="double" default="180" unit="deg">
+						<description>Reject station magnitudes beyond this distance. Set ~12 to drop teleseismic stations.</description>
+					</parameter>
+					<!-- Station corrections (applied by the SeisComP magnitude base):
+					     corrected station Mw = multiplier * Mw + offset. Set per station
+					     via that station's binding to apply per-station site corrections
+					     from a calibration (e.g. station_corrections.csv); a positive
+					     site term means the station reads high, so offset = -(site term). -->
+					<parameter name="multiplier" type="string" default="1.0">
+						<description>Linear station correction a in a*Mw+b; default or "a@profile" list. Leave 1.0 for none.</description>
+					</parameter>
+					<parameter name="offset" type="string" default="0.0">
+						<description>Constant station correction b in a*Mw+b; set per-station to remove site bias = -(site term). Leave 0.0 for none.</description>
+					</parameter>
+			</extend-struct>
+		</configuration>
+	</plugin>
+</seiscomp>
