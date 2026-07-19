@@ -38,6 +38,22 @@
 						component) or "S" (horizontal). Shared by both processors.
 						</description>
 					</parameter>
+					<parameter name="attenuationTable" type="path">
+						<description>
+						Optional path to an EMPIRICAL attenuation table (a
+						regionally-calibrated GIT result), used INSTEAD of the
+						parametric Q model + geometric spreading. The CSV is a
+						frequency x hypocentral-distance grid of the additive log10
+						path correction A(f,r): log10(source)=log10(observed)+A,
+						bundling geometric spreading + anelastic attenuation. When
+						set, the amplitude processor applies A(f,rhyp) and the
+						magnitude processor skips its own geometric spreading; set a
+						one-time 'calibration' offset for the absolute level. Leave
+						unset to use the parametric model (Q0/Qalpha or layered
+						'model'). See examples/au_attenuation_table.csv (T. Allen,
+						Australia) and make_atten_table.py for the format.
+						</description>
+					</parameter>
 					<!-- Scalar single-layer model (used only when 'model' is unset).
 					     The simplest way to set a uniform, regionally-calibrated
 					     attenuation and source velocity/density. For RELIABLE Mw,

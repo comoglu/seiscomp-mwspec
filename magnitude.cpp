@@ -80,12 +80,21 @@ MagnitudeProcessor_MwSpec::computeMagnitude(
 	const double epicentralKm = Math::Geo::deg2km(delta);
 	const SourceParams sp = _cfg.model.paramsAt(depth, _cfg.phase);
 
-	const double geoDistKm = geoSpreadingDistance(_cfg.phase, epicentralKm, depth,
-	                                              _cfg.geoDepth1, _cfg.geoDepth2,
-	                                              _cfg.herkijDistanceKm);
-	if ( geoDistKm <= 0.0 ||
-	     geoDistKm >= 0.5 * std::numeric_limits<double>::max() ) {
-		return DistanceOutOfRange;
+	// With the empirical attenuation table the geometric spreading was already
+	// removed on the amplitude side (Omega0 is a source level), so use R=1 here
+	// and let the one-time `calibration` offset set the absolute level.
+	double geoDistKm;
+	if ( _cfg.useAttenTable ) {
+		geoDistKm = 1.0;
+	}
+	else {
+		geoDistKm = geoSpreadingDistance(_cfg.phase, epicentralKm, depth,
+		                                 _cfg.geoDepth1, _cfg.geoDepth2,
+		                                 _cfg.herkijDistanceKm);
+		if ( geoDistKm <= 0.0 ||
+		     geoDistKm >= 0.5 * std::numeric_limits<double>::max() ) {
+			return DistanceOutOfRange;
+		}
 	}
 
 	const double cornerFreq = (period > 0.0) ? (1.0 / period) : 0.0;

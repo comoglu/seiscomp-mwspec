@@ -17,6 +17,9 @@
 #include <seiscomp/processing/amplitudeprocessor.h>
 #include <seiscomp/processing/magnitudeprocessor.h>
 
+#include <string>
+#include <vector>
+
 #include "brune.h"
 
 
@@ -30,6 +33,31 @@ namespace MwSpec {
 
 //! Unit of the carried spectral flat level (Omega0), as for Mwp.
 #define MWSPEC_AMP_UNIT "nm*s"
+
+
+/**
+ * Generic frequency x distance attenuation table — an empirical alternative to
+ * the parametric Q model, for agencies with a regionally-calibrated attenuation
+ * (e.g. a GIT result). A(f, rhyp) is the ADDITIVE log10 path correction
+ * (geometric spreading + anelastic + any regional term) that brings the
+ * observed displacement spectrum to the source:  log10(S) = log10(obs) + A.
+ * Near-site kappa stays a separate per-station config. Loaded from a CSV named
+ * by magnitudes.Mw(spec).attenuationTable; see the plugin's make_atten_table.py
+ * for the format and a worked example.
+ */
+struct AttenTable {
+	std::vector<double> logFreqs;          //!< log10(grid frequencies), ascending
+	std::vector<double> dists;             //!< grid hypocentral distances [km], ascending
+	std::vector<std::vector<double>> A;    //!< A[i][j] = correction at (freq i, dist j)
+
+	bool empty() const {
+		return logFreqs.empty() || dists.empty() || A.empty();
+	}
+
+	//! Bilinear interpolation (linear in log10 f, linear in distance), clamped
+	//! to the grid edges. @p f in Hz, @p rhyp in km. Returns additive log10.
+	double correction(double f, double rhyp) const;
+};
 
 
 /**
@@ -62,6 +90,15 @@ struct MwSpecConfig {
 	double   calibration      = 0.0;     //!< log10 additive level calibration (Seisan match)
 	bool     applyTaper       = true;    //!< cosine taper before the FFT
 	BruneFitOptions fit;                  //!< grid-search tunables
+
+	// Optional empirical attenuation table (alternative to the parametric Q +
+	// geometric spreading). When a path is configured the amplitude processor
+	// corrects the spectrum with the table (geometric + anelastic) and the
+	// magnitude processor skips its own geometric spreading (R=1); the absolute
+	// level is then set once via `calibration`. See AttenTable.
+	std::string attenTablePath;           //!< magnitudes.Mw(spec).attenuationTable
+	bool        useAttenTable = false;    //!< true when attenTablePath is set+loaded
+	AttenTable  attenTable;               //!< parsed grid (amplitude side uses it)
 };
 
 

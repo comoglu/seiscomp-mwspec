@@ -17,7 +17,9 @@
 #include <seiscomp/logging/log.h>
 #include <seiscomp/core/datetime.h>
 #include <seiscomp/datamodel/origin.h>
+#include <seiscomp/datamodel/sensorlocation.h>
 #include <seiscomp/math/fft.h>
+#include <seiscomp/math/geo.h>
 #include <seiscomp/math/mean.h>
 #include <seiscomp/math/windows/cosine.h>
 
@@ -332,6 +334,29 @@ bool AmplitudeProcessor_MwSpec::computeAmplitude(
 
 	const SourceParams sp = _cfg.model.paramsAt(depth, _cfg.phase);
 
+	// Hypocentral distance [km], needed only for the empirical attenuation
+	// table (which folds geometric spreading + anelastic into one term).
+	double rhyp = 0.0;
+	if ( _cfg.useAttenTable ) {
+		if ( _environment.hypocenter && _environment.receiver ) {
+			try {
+				const double elat = _environment.hypocenter->latitude().value();
+				const double elon = _environment.hypocenter->longitude().value();
+				const double slat = _environment.receiver->latitude();
+				const double slon = _environment.receiver->longitude();
+				double dDeg, az, baz;
+				Math::Geo::delazi(elat, elon, slat, slon, &dDeg, &az, &baz);
+				const double epiKm = Math::Geo::deg2km(dDeg);
+				rhyp = std::sqrt(epiKm * epiKm + depth * depth);
+			}
+			catch ( ... ) {}
+		}
+		if ( rhyp <= 0.0 ) {
+			setStatus(Error, 7);   // need geometry for the attenuation table
+			return false;
+		}
+	}
+
 	// --- log-spaced evaluation frequencies --------------------------------
 	const double windowLen = (nsig / fsamp);
 	double flow = (_cfg.fixedFmin > 0.0) ? _cfg.fixedFmin
@@ -357,14 +382,25 @@ bool AmplitudeProcessor_MwSpec::computeAmplitude(
 		// Attenuation correction (Seisan get_om_f0): divide the spectrum by
 		// exp(-pi f tt / Q(f)) * exp(-pi kappa f), i.e. boost it back up.
 		double corrLog10 = 0.0;  // log10 of the multiplicative correction
-		if ( sp.q0 > 0.0 ) {
-			const double q = evalQ(sp.q0, f, sp.qalpha, sp.qcorner);
-			if ( q > 0.0 ) {
-				corrLog10 += (PI * f * travelTime / q) / std::log(10.0);
+		if ( _cfg.useAttenTable ) {
+			// Empirical table: one additive log10 term (geometric spreading +
+			// anelastic). The magnitude processor then skips geometric
+			// spreading (R=1). Near-site kappa stays separate below.
+			corrLog10 = _cfg.attenTable.correction(f, rhyp);
+			if ( sp.kappa != 0.0 ) {
+				corrLog10 += (PI * sp.kappa * f) / std::log(10.0);
 			}
 		}
-		if ( sp.kappa != 0.0 ) {
-			corrLog10 += (PI * sp.kappa * f) / std::log(10.0);
+		else {
+			if ( sp.q0 > 0.0 ) {
+				const double q = evalQ(sp.q0, f, sp.qalpha, sp.qcorner);
+				if ( q > 0.0 ) {
+					corrLog10 += (PI * f * travelTime / q) / std::log(10.0);
+				}
+			}
+			if ( sp.kappa != 0.0 ) {
+				corrLog10 += (PI * sp.kappa * f) / std::log(10.0);
+			}
 		}
 
 		logSig[i] = logLogInterp(sFreq, sAmp, f) + corrLog10 + _cfg.calibration;

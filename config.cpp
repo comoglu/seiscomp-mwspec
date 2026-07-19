@@ -12,12 +12,46 @@
 #include <seiscomp/logging/log.h>
 #include <seiscomp/config/config.h>
 
+#include <algorithm>
+#include <cmath>
+#include <fstream>
+#include <sstream>
+
 #include "mwspec.h"
 
 
 namespace Seiscomp {
 namespace Magnitudes {
 namespace MwSpec {
+
+
+// ---------------------------------------------------------------------------
+double AttenTable::correction(double f, double rhyp) const {
+	if ( empty() ) {
+		return 0.0;
+	}
+	const double lf = std::log10(std::max(f, 1.0e-9));
+
+	// bracket + fraction along an ascending axis, clamped to the edges
+	auto bracket = [](const std::vector<double> &ax, double x,
+	                  size_t &i, double &t) {
+		if ( x <= ax.front() ) { i = 0; t = 0.0; return; }
+		if ( x >= ax.back() )  { i = ax.size() - 2; t = 1.0; return; }
+		size_t hi = std::upper_bound(ax.begin(), ax.end(), x) - ax.begin();
+		i = hi - 1;
+		t = (x - ax[i]) / (ax[i + 1] - ax[i]);
+	};
+
+	size_t i, j;
+	double tf, tr;
+	bracket(logFreqs, lf, i, tf);
+	bracket(dists, rhyp, j, tr);
+
+	const double a00 = A[i][j],     a01 = A[i][j + 1];
+	const double a10 = A[i + 1][j], a11 = A[i + 1][j + 1];
+	return a00 * (1 - tf) * (1 - tr) + a10 * tf * (1 - tr)
+	     + a01 * (1 - tf) * tr       + a11 * tf * tr;
+}
 
 
 namespace {
@@ -35,6 +69,61 @@ bool readModelLayers(const Config::Config *cfg, const std::string &key,
 	}
 	catch ( ... ) {}
 	return false;
+}
+
+std::vector<double> splitCSV(const std::string &line) {
+	std::vector<double> out;
+	std::stringstream ss(line);
+	std::string cell;
+	while ( std::getline(ss, cell, ',') ) {
+		try { out.push_back(std::stod(cell)); }
+		catch ( ... ) { out.push_back(std::nan("")); }
+	}
+	return out;
+}
+
+// Parse the generic attenuation-table CSV into @p tab. Format: a header row
+// "freq_dist,<R1>,<R2>,...", then one row per frequency "<f>,<A(f,R1)>,...".
+// '#' comment lines are ignored. A(f,r) is the additive log10 path correction.
+bool parseAttenTable(const std::string &path, AttenTable &tab) {
+	std::ifstream in(path.c_str());
+	if ( !in ) {
+		SEISCOMP_ERROR("Mw(spec) attenuationTable: cannot open '%s'", path.c_str());
+		return false;
+	}
+	tab = AttenTable();
+	std::string line;
+	bool haveHeader = false;
+	while ( std::getline(in, line) ) {
+		if ( line.empty() || line[0] == '#' ) {
+			continue;
+		}
+		if ( !haveHeader ) {
+			// header: first cell is a label, remainder are distances [km]
+			std::stringstream ss(line);
+			std::string cell;
+			std::getline(ss, cell, ',');                 // drop label
+			while ( std::getline(ss, cell, ',') ) {
+				tab.dists.push_back(std::stod(cell));
+			}
+			haveHeader = true;
+			continue;
+		}
+		std::vector<double> row = splitCSV(line);
+		if ( row.size() != tab.dists.size() + 1 ) {
+			SEISCOMP_ERROR("Mw(spec) attenuationTable: row width mismatch");
+			return false;
+		}
+		tab.logFreqs.push_back(std::log10(row[0]));
+		tab.A.emplace_back(row.begin() + 1, row.end());
+	}
+	if ( tab.dists.size() < 2 || tab.logFreqs.size() < 2 ) {
+		SEISCOMP_ERROR("Mw(spec) attenuationTable: need >=2 freqs and >=2 dists");
+		return false;
+	}
+	SEISCOMP_INFO("Mw(spec) attenuationTable loaded: %zu freqs x %zu dists from %s",
+	              tab.logFreqs.size(), tab.dists.size(), path.c_str());
+	return true;
 }
 
 }
@@ -115,6 +204,20 @@ bool readMwSpecConfig(const Processing::Settings &settings,
 		double qCorner = 0.0;
 		if ( settings.getValue(qCorner, prefix + ".qCorner") ) {
 			out.model.setQCorner(qCorner);
+		}
+	}
+
+	// --- optional empirical attenuation table (canonical, shared) --------
+	{
+		std::string tpath;
+		if ( (settings.getValue(tpath, canonical + ".attenuationTable") ||
+		      settings.getValue(tpath, prefix + ".attenuationTable")) &&
+		     !tpath.empty() ) {
+			out.attenTablePath = tpath;
+			if ( !parseAttenTable(tpath, out.attenTable) ) {
+				return false;
+			}
+			out.useAttenTable = true;
 		}
 	}
 
