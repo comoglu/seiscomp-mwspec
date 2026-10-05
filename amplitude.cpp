@@ -8,6 +8,7 @@
  * spectral flat level Omega0 (carried in nm*s) and the corner frequency    *
  * (carried as the amplitude "period"). Ported from Seisan SPEC/AUTOMAG.    *
  *                                                                         *
+ * Copyright (C) 2026 Mustafa Comoglu (Geoscience Australia)               *
  * GNU Affero General Public License Usage - see LICENSE.                   *
  ***************************************************************************/
 
@@ -16,6 +17,7 @@
 
 #include <seiscomp/logging/log.h>
 #include <seiscomp/core/datetime.h>
+#include <seiscomp/datamodel/amplitude.h>
 #include <seiscomp/datamodel/origin.h>
 #include <seiscomp/datamodel/sensorlocation.h>
 #include <seiscomp/math/fft.h>
@@ -28,6 +30,7 @@
 #include <vector>
 
 #include "mwspec.h"
+#include "version.h"
 
 
 namespace Seiscomp {
@@ -241,6 +244,81 @@ bool AmplitudeProcessor_MwSpec::setParameter(Capability cap,
 }
 
 
+void AmplitudeProcessor_MwSpec::setEnvironment(
+		const DataModel::Origin *hypocenter,
+		const DataModel::SensorLocation *receiver,
+		const DataModel::Pick *pick) {
+	Processing::AmplitudeProcessor::setEnvironment(hypocenter, receiver, pick);
+
+	_srcDepthKm = 0.0;
+	_originTime = Core::None;
+	_rhypKm = 0.0;
+
+	if ( !hypocenter ) {
+		return;
+	}
+
+	try { _srcDepthKm = hypocenter->depth().value(); }
+	catch ( ... ) {}
+	try { _originTime = hypocenter->time().value(); }
+	catch ( ... ) {}
+
+	if ( receiver ) {
+		try {
+			double dDeg, az, baz;
+			Math::Geo::delazi(hypocenter->latitude().value(),
+			                  hypocenter->longitude().value(),
+			                  receiver->latitude(), receiver->longitude(),
+			                  &dDeg, &az, &baz);
+			const double epiKm = Math::Geo::deg2km(dDeg);
+			_rhypKm = std::sqrt(epiKm * epiKm + _srcDepthKm * _srcDepthKm);
+		}
+		catch ( ... ) {}
+	}
+}
+
+
+void AmplitudeProcessor_MwSpec::writeDiagnostics(DataModel::Amplitude *amplitude,
+                                                 const std::string &suffix) const {
+	if ( !_fit.valid ) {
+		return;
+	}
+
+	setComment(amplitude, "Om0" + suffix, _fit.omega0);
+	setComment(amplitude, "fc" + suffix, _fit.cornerFreq);
+	setComment(amplitude, "fmin" + suffix, _fit.fmin);
+	setComment(amplitude, "fmax" + suffix, _fit.fmax);
+	setComment(amplitude, "fitResidual" + suffix, _fit.residual, "%.3f");
+	if ( _fit.deltaKappa != 0.0 ) {
+		setComment(amplitude, "deltaKappa" + suffix, _fit.deltaKappa);
+	}
+	if ( !_cfg.useAttenTable ) {
+		setComment(amplitude, "travelTime" + suffix, _fit.travelTime, "%.2f");
+	}
+}
+
+
+void AmplitudeProcessor_MwSpec::finalizeAmplitude(DataModel::Amplitude *amplitude) const {
+	if ( !amplitude ) {
+		return;
+	}
+
+	amplitude->setMethodID(std::string("Brune/") + _cfg.phase +
+	                       (_cfg.useAttenTable ? "/table" : "/Q"));
+
+	try {
+		amplitude->creationInfo().setVersion(MWSPEC_VERSION);
+	}
+	catch ( ... ) {
+		DataModel::CreationInfo ci;
+		ci.setVersion(MWSPEC_VERSION);
+		amplitude->setCreationInfo(ci);
+	}
+
+	writeDiagnostics(amplitude, "");
+}
+
+
 void AmplitudeProcessor_MwSpec::prepareData(DoubleArray &data) {
 	// The base class deconvolves to the configured data unit (displacement).
 	// Validate the metadata required for that here so failures are explicit.
@@ -277,6 +355,8 @@ bool AmplitudeProcessor_MwSpec::computeAmplitude(
 	AmplitudeIndex *dt,
 	AmplitudeValue *amplitude,
 	double *period, double *snr) {
+
+	_fit = FitDiagnostics();
 
 	const double fsamp = _stream.fsamp;
 	if ( fsamp <= 0.0 ) {
@@ -316,45 +396,23 @@ bool AmplitudeProcessor_MwSpec::computeAmplitude(
 	}
 
 	// --- source/attenuation parameters at the hypocentre ------------------
-	double depth = 0.0;
+	// Values were copied in setEnvironment(); the Origin itself may be gone.
 	double travelTime = 0.0;
-	if ( _environment.hypocenter ) {
-		try { depth = _environment.hypocenter->depth().value(); }
-		catch ( ... ) {}
-		if ( _trigger ) {
-			try {
-				travelTime = (*_trigger - _environment.hypocenter->time().value()).length();
-			}
-			catch ( ... ) {}
-		}
+	if ( _originTime && _trigger ) {
+		travelTime = (*_trigger - *_originTime).length();
 	}
 	if ( travelTime < 0.0 ) {
 		travelTime = 0.0;
 	}
 
-	const SourceParams sp = _cfg.model.paramsAt(depth, _cfg.phase);
+	const SourceParams sp = _cfg.model.paramsAt(_srcDepthKm, _cfg.phase);
 
 	// Hypocentral distance [km], needed only for the empirical attenuation
 	// table (which folds geometric spreading + anelastic into one term).
-	double rhyp = 0.0;
-	if ( _cfg.useAttenTable ) {
-		if ( _environment.hypocenter && _environment.receiver ) {
-			try {
-				const double elat = _environment.hypocenter->latitude().value();
-				const double elon = _environment.hypocenter->longitude().value();
-				const double slat = _environment.receiver->latitude();
-				const double slon = _environment.receiver->longitude();
-				double dDeg, az, baz;
-				Math::Geo::delazi(elat, elon, slat, slon, &dDeg, &az, &baz);
-				const double epiKm = Math::Geo::deg2km(dDeg);
-				rhyp = std::sqrt(epiKm * epiKm + depth * depth);
-			}
-			catch ( ... ) {}
-		}
-		if ( rhyp <= 0.0 ) {
-			setStatus(Error, 7);   // need geometry for the attenuation table
-			return false;
-		}
+	const double rhyp = _rhypKm;
+	if ( _cfg.useAttenTable && rhyp <= 0.0 ) {
+		setStatus(Error, 7);   // need geometry for the attenuation table
+		return false;
 	}
 
 	// --- log-spaced evaluation frequencies --------------------------------
@@ -471,6 +529,15 @@ bool AmplitudeProcessor_MwSpec::computeAmplitude(
 	dt->index = 0.5 * (sigStart + sigEnd);
 	dt->begin = sigStart - dt->index;
 	dt->end   = sigEnd - dt->index;
+
+	_fit.valid      = true;
+	_fit.omega0     = amplitude->value;
+	_fit.cornerFreq = fit.cornerFreq;
+	_fit.fmin       = fmin;
+	_fit.fmax       = fmax;
+	_fit.residual   = fit.residual;
+	_fit.deltaKappa = fit.deltaKappa;
+	_fit.travelTime = travelTime;
 
 	SEISCOMP_DEBUG("%s.%s.%s %c: Om0=%g nm*s fc=%.3f Hz band=%.2f-%.2f Hz "
 	               "res=%.3f tt=%.1fs gain=%g",

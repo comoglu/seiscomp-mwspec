@@ -4,6 +4,7 @@
  * Plugin entry point. Registers the Mw(spec) amplitude and magnitude       *
  * processors (a port of Seisan SPEC/AUTOMAG spectral Mw).                  *
  *                                                                         *
+ * Copyright (C) 2026 Mustafa Comoglu (Geoscience Australia)               *
  * GNU Affero General Public License Usage - see LICENSE.                   *
  ***************************************************************************/
 
@@ -16,6 +17,6 @@
 ADD_SC_PLUGIN(
 	"Spectral moment magnitude Mw(spec): per-station Brune omega-square fit of "
 	"the displacement spectrum (port of Seisan SPEC/AUTOMAG).",
-	"gempa/Seisan port",
+	"Mustafa Comoglu (Geoscience Australia)",
 	MWSPEC_VERSION_MAJOR, MWSPEC_VERSION_MINOR, MWSPEC_VERSION_PATCH
 )

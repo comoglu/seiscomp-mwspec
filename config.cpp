@@ -3,6 +3,7 @@
  *                                                                         *
  * Shared configuration reader for the amplitude and magnitude processors. *
  *                                                                         *
+ * Copyright (C) 2026 Mustafa Comoglu (Geoscience Australia)               *
  * GNU Affero General Public License Usage - see LICENSE.                   *
  ***************************************************************************/
 
@@ -55,6 +56,34 @@ double AttenTable::correction(double f, double rhyp) const {
 
 
 namespace {
+
+// Shared keys (magnitudes.Mw(spec).phase, .attenuationTable, .vp, ...) are
+// module-level settings (see descriptions/global_mwspec.xml). Settings::getValue
+// only looks at bindings and module.trunk.* overrides, so read the module
+// configuration first and keep the binding as a fallback.
+bool sharedValue(const Processing::Settings &settings, const std::string &key,
+                 std::string &value) {
+	if ( settings.localConfiguration ) {
+		try {
+			value = settings.localConfiguration->getString(key);
+			return true;
+		}
+		catch ( ... ) {}
+	}
+	return settings.getValue(value, key);
+}
+
+bool sharedValue(const Processing::Settings &settings, const std::string &key,
+                 double &value) {
+	if ( settings.localConfiguration ) {
+		try {
+			value = settings.localConfiguration->getDouble(key);
+			return true;
+		}
+		catch ( ... ) {}
+	}
+	return settings.getValue(value, key);
+}
 
 // Reads a list of model layer strings from the global configuration. Each
 // list item is "depth vp vs qp qap qs qas density".
@@ -142,8 +171,8 @@ bool readMwSpecConfig(const Processing::Settings &settings,
 	// --- phase (canonical, with per-prefix fallback) ----------------------
 	{
 		std::string phase;
-		if ( (settings.getValue(phase, canonical + ".phase") ||
-		      settings.getValue(phase, prefix + ".phase")) && !phase.empty() ) {
+		if ( (sharedValue(settings, canonical + ".phase", phase) ||
+		      sharedValue(settings, prefix + ".phase", phase)) && !phase.empty() ) {
 			char p = static_cast<char>(::toupper(phase[0]));
 			if ( p == 'P' || p == 'S' ) {
 				out.phase = p;
@@ -174,11 +203,11 @@ bool readMwSpecConfig(const Processing::Settings &settings,
 			// Q0=0 i.e. no attenuation correction). For reliable Mw, set Q0/Qalpha
 			// to a regionally-calibrated value (the analogue of Seisan CODAQ/QLG).
 			double vp = 6.0, vs = 3.5, density = 3.0, q0 = 0.0, qalpha = 0.0;
-			settings.getValue(vp,      canonical + ".vp");
-			settings.getValue(vs,      canonical + ".vs");
-			settings.getValue(density, canonical + ".density");
-			settings.getValue(q0,      canonical + ".Q0");
-			settings.getValue(qalpha,  canonical + ".Qalpha");
+			sharedValue(settings, canonical + ".vp",      vp);
+			sharedValue(settings, canonical + ".vs",      vs);
+			sharedValue(settings, canonical + ".density", density);
+			sharedValue(settings, canonical + ".Q0",      q0);
+			sharedValue(settings, canonical + ".Qalpha",  qalpha);
 			std::string layer =
 				"0.0 " + std::to_string(vp) + " " + std::to_string(vs) + " " +
 				std::to_string(q0) + " " + std::to_string(qalpha) + " " +
@@ -210,8 +239,8 @@ bool readMwSpecConfig(const Processing::Settings &settings,
 	// --- optional empirical attenuation table (canonical, shared) --------
 	{
 		std::string tpath;
-		if ( (settings.getValue(tpath, canonical + ".attenuationTable") ||
-		      settings.getValue(tpath, prefix + ".attenuationTable")) &&
+		if ( (sharedValue(settings, canonical + ".attenuationTable", tpath) ||
+		      sharedValue(settings, prefix + ".attenuationTable", tpath)) &&
 		     !tpath.empty() ) {
 			out.attenTablePath = tpath;
 			if ( !parseAttenTable(tpath, out.attenTable) ) {

@@ -10,7 +10,7 @@ scaled from mB/Mwp or derived from a full moment-tensor inversion).
 Registers an amplitude processor and a magnitude processor of type
 **`Mw(spec)`** with `scamp` / `scmag` / `scolv`.
 
-> **Status:** v0.4.1. P (vertical) and S (N+E vector-sum) phases; configurable
+> **Status:** v0.6.0. P (vertical) and S (N+E vector-sum) phases; configurable
 > velocity/Q/density model, distance gate, per-station corrections and
 > calibration. The displacement spectrum is **bit-validated against Seisan's own
 > `spectrum()` routine** (×1.000 over a population of real channels), and the
@@ -65,6 +65,33 @@ magnitudes.Mw(spec).phase = P
 Per-station measurement/moment parameters are binding profiles (scconfig →
 Bindings → Amplitudes/Magnitudes → `Mw(spec)`); see `descriptions/global_mwspec.xml`.
 
+`phase` must be set in the module configuration (as above), not per binding:
+scamp/scolv choose the streams (Z, or N+E) before a binding is read. A binding
+phase that disagrees with it makes the processor's setup fail with an error.
+
+## Fit diagnostics (comments)
+The values behind each measurement are attached as comments, so they reach the
+database/QuakeML and can be shown in scolv or by scripts. Comment ids:
+
+| Object | id | Unit | Meaning |
+|---|---|---|---|
+| Amplitude | `Om0` | nm·s | spectral flat level (= amplitude value for P) |
+| Amplitude | `fc` | Hz | corner frequency used for the magnitude |
+| Amplitude | `fmin`, `fmax` | Hz | frequency band that was fitted |
+| Amplitude | `fitResidual` | — | Brune-fit misfit (gate: `maxResidual`) |
+| Amplitude | `deltaKappa` | s | fitted Δκ (only when the dkappa search is on) |
+| Amplitude | `travelTime` | s | travel time used for the Q correction (Q mode only) |
+| StationMagnitude | `M0` | N·m | seismic moment |
+| StationMagnitude | `fc` | Hz | corner frequency |
+| StationMagnitude | `sourceRadius` | m | Brune radius 0.37·c/fc |
+| StationMagnitude | `stressDrop` | MPa | Brune stress drop 7/16·M0/r³ |
+| StationMagnitude | `geoDistance` | km | geometric-spreading distance R (Q mode only) |
+
+For S the per-component values carry a `.N` / `.E` suffix (`Om0.N`, `fc.E`, …);
+the unsuffixed `fc` is the combined value the magnitude uses. The amplitude
+`methodID` is `Brune/<phase>/<Q|table>`, and `creationInfo.version` is the
+plugin version.
+
 ## Preparing for reliable Mw
 Spectral Mw needs the right inputs (a regionally-calibrated Q, curated stations,
 optional per-station corrections). See **`PREPARING_FOR_RELIABLE_MW.md`** for the
@@ -81,11 +108,17 @@ full checklist and the exact config keys (`Q0`/`Qalpha`/`vp`/`vs`/`density`,
   (default `vector_sum` = sqrt(N²+E²), the total horizontal S motion). P uses the
   vertical only. The registered processor is a component combiner that runs one
   worker (P) or two (S); see `combiner.cpp`.
+- **S window**: amplitudes are triggered on the P pick, so the S signal window
+  (`signalPreTime`/`signalDuration`) currently starts at the P onset, and the Q
+  correction uses the P travel time. Choose `signalDuration` to cover the S
+  arrival at your distances.
 - Important implementation detail: SeisComP's `deconvolveFFT` removes only the
   normalised response *shape* — the processor divides out the sensitivity (gain)
   itself, as `ML`/`MN`/`A5_2` do.
 
-## Credit / license
+## Author / credit / license
+Author: **Mustafa Comoglu** (Geoscience Australia).
+
 Ports the Seisan **SPEC / AUTOMAG** spectral-Mw algorithm by Lars Ottemöller.
 Distributed under the **GNU Affero General Public License v3.0** — see
 [`LICENSE`](LICENSE) and the per-file source headers. SeisComP® is a trademark

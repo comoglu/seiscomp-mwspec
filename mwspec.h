@@ -4,6 +4,7 @@
  * Per-station moment magnitude Mw(spec) from a Brune omega-square fit of   *
  * the displacement spectrum, porting Seisan SPEC/AUTOMAG.                  *
  *                                                                         *
+ * Copyright (C) 2026 Mustafa Comoglu (Geoscience Australia)               *
  * GNU Affero General Public License Usage - see LICENSE.                   *
  ***************************************************************************/
 
@@ -14,9 +15,11 @@
 
 #include <seiscomp/core/plugin.h>
 #include <seiscomp/core/version.h>
+#include <seiscomp/datamodel/comment.h>
 #include <seiscomp/processing/amplitudeprocessor.h>
 #include <seiscomp/processing/magnitudeprocessor.h>
 
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -111,6 +114,45 @@ bool readMwSpecConfig(const Processing::Settings &settings,
                       const std::string &prefix, MwSpecConfig &out);
 
 
+/**
+ * Sets comment @p id of an Amplitude or StationMagnitude to the number
+ * @p value (printed with @p fmt), replacing an existing comment with the same
+ * id. The fit diagnostics travel to the database/QuakeML this way, so scolv
+ * and external tools can show them; see the README for the comment ids.
+ */
+template <typename T>
+void setComment(T *obj, const std::string &id, double value,
+                const char *fmt = "%.4g") {
+	char buf[64];
+	std::snprintf(buf, sizeof(buf), fmt, value);
+	DataModel::Comment *c = obj->comment(DataModel::CommentIndex(id));
+	if ( c ) {
+		c->setText(buf);
+		return;
+	}
+	DataModel::CommentPtr nc = new DataModel::Comment;
+	nc->setId(id);
+	nc->setText(buf);
+	obj->add(nc.get());
+}
+
+
+/**
+ * Per-component spectral fit result kept by the amplitude worker after a
+ * successful computeAmplitude(), for finalizeAmplitude().
+ */
+struct FitDiagnostics {
+	bool   valid      = false;
+	double omega0     = 0.0;   //!< flat level [nm*s], gain-corrected
+	double cornerFreq = 0.0;   //!< [Hz]
+	double fmin       = 0.0;   //!< fitted band low edge [Hz]
+	double fmax       = 0.0;   //!< fitted band high edge [Hz]
+	double residual   = 0.0;   //!< Brune-fit misfit
+	double deltaKappa = 0.0;   //!< fitted delta-kappa
+	double travelTime = 0.0;   //!< [s] used for the Q correction
+};
+
+
 // ---------------------------------------------------------------------------
 //  Amplitude processor: builds the displacement spectrum, fits the Brune
 //  model and emits Omega0 (flat level, nm*s) with the corner frequency as the
@@ -127,6 +169,20 @@ class SC_SYSTEM_CLIENT_API AmplitudeProcessor_MwSpec : public Processing::Amplit
 		    capabilityParameters(Capability cap) const override;
 		bool setParameter(Capability cap, const std::string &value) override;
 
+		void setEnvironment(const DataModel::Origin *hypocenter,
+		                    const DataModel::SensorLocation *receiver,
+		                    const DataModel::Pick *pick) override;
+
+		void finalizeAmplitude(DataModel::Amplitude *amplitude) const override;
+
+		//! Diagnostics of the last successful fit (valid == false otherwise).
+		const FitDiagnostics &fitDiagnostics() const { return _fit; }
+
+		//! Writes the methodID, version and fit-diagnostic comments.
+		//! @p suffix is appended to the comment ids (e.g. ".N" for S workers).
+		void writeDiagnostics(DataModel::Amplitude *amplitude,
+		                      const std::string &suffix) const;
+
 	protected:
 		void prepareData(DoubleArray &data) override;
 
@@ -142,7 +198,16 @@ class SC_SYSTEM_CLIENT_API AmplitudeProcessor_MwSpec : public Processing::Amplit
 		void applyConfig();
 
 	private:
-		MwSpecConfig _cfg;
+		MwSpecConfig   _cfg;
+		FitDiagnostics _fit;
+
+		// Hypocentre values copied in setEnvironment(). The base class keeps
+		// only a raw Origin pointer, and scamp does not keep a messaging
+		// origin alive until our (long) window completes, so it must not be
+		// dereferenced in computeAmplitude().
+		double          _srcDepthKm = 0.0;
+		OPT(Core::Time) _originTime;
+		double          _rhypKm     = 0.0;   //!< 0 = geometry unavailable
 
 	friend class AmplitudeProcessor_MwSpecCombiner;
 };
@@ -181,6 +246,8 @@ class SC_SYSTEM_CLIENT_API AmplitudeProcessor_MwSpecCombiner : public Processing
 
 		void reprocess(OPT(double) searchBegin, OPT(double) searchEnd) override;
 
+		void finalizeAmplitude(DataModel::Amplitude *amplitude) const override;
+
 	protected:
 		bool computeAmplitude(const DoubleArray &data,
 		                      size_t i1, size_t i2,
@@ -191,6 +258,8 @@ class SC_SYSTEM_CLIENT_API AmplitudeProcessor_MwSpecCombiner : public Processing
 		                      double *period, double *snr) override;
 
 	private:
+		bool feedWorkers(const Record *record);
+
 		void newAmplitude(const AmplitudeProcessor *proc,
 		                  const AmplitudeProcessor::Result &res);
 
@@ -239,8 +308,18 @@ class SC_SYSTEM_CLIENT_API MagnitudeProcessor_MwSpec : public Processing::Magnit
 		                        const Locale *,
 		                        double &value) override;
 
+		void finalizeMagnitude(DataModel::StationMagnitude *magnitude) const override;
+
 	private:
 		MwSpecConfig _cfg;
+
+		// Source parameters of the last successful computeMagnitude(). scmag
+		// and scolv call finalizeMagnitude() right after it for the same
+		// amplitude, which is how they reach the StationMagnitude comments.
+		bool         _lastValid = false;
+		MomentResult _last;
+		double       _lastCornerFreq = 0.0;
+		double       _lastGeoDistKm  = 0.0;
 };
 
 

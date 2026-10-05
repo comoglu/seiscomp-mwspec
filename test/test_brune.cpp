@@ -3,6 +3,9 @@
 //
 // These tests check the science port for internal consistency and against
 // hand-computable Seisan reference values. They do NOT touch SeisComP.
+//
+// Copyright (C) 2026 Mustafa Comoglu (Geoscience Australia)
+// GNU Affero General Public License Usage - see LICENSE.
 
 #include "../brune.h"
 
@@ -130,6 +133,11 @@ int main() {
 		check(close(mr.mw, expMw, 1e-6), "Mw matches", mr.mw, expMw);
 		// Brune radius r = 0.37*v/fc (km) -> metres
 		check(close(mr.sourceRadius, 0.37 * v / 1.7 * 1000.0, 1e-3), "source radius");
+		// Brune stress drop 7/16 * M0 / r^3 in SI (Pa), reported in bar
+		double r = mr.sourceRadius;
+		double expBar = 0.44 * expM0 / (r * r * r) / 1e5;
+		check(close(mr.stressDrop, expBar, expBar * 1e-6), "stress drop in bar",
+		      mr.stressDrop, expBar);
 		printf("    [info] om=2.0 nm*s, R=100km, v=6 -> M0=%.3e Nm, Mw=%.2f\n",
 		       mr.m0, mr.mw);
 	}

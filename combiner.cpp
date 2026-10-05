@@ -8,6 +8,7 @@
  * the standard horizontal combination for spectral moment magnitudes.      *
  * Modelled on the gempa MLc/MLh two-horizontal proxy.                      *
  *                                                                         *
+ * Copyright (C) 2026 Mustafa Comoglu (Geoscience Australia)               *
  * GNU Affero General Public License Usage - see LICENSE.                   *
  ***************************************************************************/
 
@@ -15,9 +16,13 @@
 #define SEISCOMP_COMPONENT MwSpec
 
 #include <seiscomp/logging/log.h>
+#include <seiscomp/client/application.h>
 #include <seiscomp/core/optional.h>
+#include <seiscomp/datamodel/amplitude.h>
 
+#include <cctype>
 #include <cmath>
+#include <exception>
 #include <functional>
 
 #include "mwspec.h"
@@ -44,6 +49,28 @@ avgTime(const Processing::AmplitudeProcessor::AmplitudeTime &a,
 	return t;
 }
 
+/**
+ * Phase from the module configuration, for use before setup(). scamp and
+ * scolv choose which streams to subscribe from usedComponent() *before*
+ * calling setup(), so an S configuration must already report Horizontal
+ * here. A phase given only in a station binding cannot be seen this early.
+ */
+char configuredPhase() {
+	if ( !SCCoreApp ) {
+		return 'P';
+	}
+	for ( const char *prefix : {"magnitudes.", "amplitudes."} ) {
+		try {
+			const std::string p = SCCoreApp->configGetString(std::string(prefix) + MWSPEC_TYPE + ".phase");
+			if ( !p.empty() ) {
+				return ::toupper(p[0]) == 'S' ? 'S' : 'P';
+			}
+		}
+		catch ( ... ) {}
+	}
+	return 'P';
+}
+
 }  // namespace
 
 
@@ -51,7 +78,7 @@ avgTime(const Processing::AmplitudeProcessor::AmplitudeTime &a,
 AmplitudeProcessor_MwSpecCombiner::AmplitudeProcessor_MwSpecCombiner()
 : Processing::AmplitudeProcessor(MWSPEC_TYPE) {
 	setUnit(MWSPEC_AMP_UNIT);
-	setUsedComponent(Vertical);   // overridden in setup() once the phase is known
+	setUsedComponent(configuredPhase() == 'S' ? Horizontal : Vertical);
 
 	_c0.setPublishFunction(std::bind(&AmplitudeProcessor_MwSpecCombiner::newAmplitude,
 	                                 this, std::placeholders::_1, std::placeholders::_2));
@@ -135,6 +162,15 @@ bool AmplitudeProcessor_MwSpecCombiner::setup(const Processing::Settings &settin
 	}
 	_phase = cfg.phase;
 
+	// The streams were chosen from usedComponent() before setup(); a phase
+	// that differs (e.g. set per binding) would never receive its data.
+	if ( (_phase == 'S') != (usedComponent() == Horizontal) ) {
+		SEISCOMP_ERROR("%s: phase %c conflicts with the module-level phase; set "
+		               "magnitudes.%s.phase in the module configuration, not "
+		               "per binding", type().c_str(), _phase, type().c_str());
+		return false;
+	}
+
 	// Optional combiner override (S only).
 	std::string c;
 	if ( settings.getValue(c, std::string("amplitudes.") + type() + ".combiner") && !c.empty() ) {
@@ -192,10 +228,10 @@ bool AmplitudeProcessor_MwSpecCombiner::setup(const Processing::Settings &settin
 // ---------------------------------------------------------------------------
 void AmplitudeProcessor_MwSpecCombiner::setTrigger(const Core::Time &trigger) {
 	Processing::AmplitudeProcessor::setTrigger(trigger);
+	// scamp and scolv set the trigger before setup(), i.e. before _nActive
+	// is known: always forward it to both workers.
 	_c0.setTrigger(trigger);
-	if ( _nActive == 2 ) {
-		_c1.setTrigger(trigger);
-	}
+	_c1.setTrigger(trigger);
 }
 
 
@@ -243,6 +279,29 @@ void AmplitudeProcessor_MwSpecCombiner::close() const {}
 
 // ---------------------------------------------------------------------------
 bool AmplitudeProcessor_MwSpecCombiner::feed(const Record *record) {
+	// No exception may leave feed(): StreamApplication::readRecords() answers
+	// an exception from storeRecord() with `delete rec`, although the workers
+	// already hold that record as their last record. The next record then
+	// releases a freed Record (SIGSEGV in WaveformProcessor::store, see
+	// CRASH_DIAGNOSIS_2026-07-22.md). Fail this processor instead.
+	try {
+		return feedWorkers(record);
+	}
+	catch ( std::exception &e ) {
+		SEISCOMP_ERROR("%s %s: exception while processing data: %s",
+		               type().c_str(), record->streamID().c_str(), e.what());
+	}
+	catch ( ... ) {
+		SEISCOMP_ERROR("%s %s: unknown exception while processing data",
+		               type().c_str(), record->streamID().c_str());
+	}
+
+	setStatus(Error, 10);
+	return false;
+}
+
+
+bool AmplitudeProcessor_MwSpecCombiner::feedWorkers(const Record *record) {
 	if ( status() > WaveformProcessor::Finished ) {
 		return false;
 	}
@@ -419,6 +478,37 @@ void AmplitudeProcessor_MwSpecCombiner::reprocess(OPT(double) searchBegin,
 			setStatus(_c1.status(), _c1.statusValue());
 		}
 	}
+}
+
+
+// ---------------------------------------------------------------------------
+void AmplitudeProcessor_MwSpecCombiner::finalizeAmplitude(DataModel::Amplitude *amplitude) const {
+	if ( !amplitude ) {
+		return;
+	}
+
+	_c0.finalizeAmplitude(amplitude);
+	if ( _nActive == 1 ) {
+		return;
+	}
+
+	// S: the worker wrote unsuffixed values of N only; replace them by
+	// per-component values plus the corner frequency that the magnitude uses
+	// (the inverse of the combined period).
+	for ( const char *id : {"Om0", "fc", "fmin", "fmax", "fitResidual",
+	                        "deltaKappa", "travelTime"} ) {
+		amplitude->removeComment(DataModel::CommentIndex(id));
+	}
+	_c0.writeDiagnostics(amplitude, ".N");
+	_c1.writeDiagnostics(amplitude, ".E");
+
+	try {
+		const double period = amplitude->period().value();
+		if ( period > 0.0 ) {
+			setComment(amplitude, "fc", 1.0 / period);
+		}
+	}
+	catch ( ... ) {}
 }
 
 

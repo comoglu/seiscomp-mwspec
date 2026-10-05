@@ -4,6 +4,7 @@
  * Faithful port of the Seisan SPEC/AUTOMAG Brune-model spectral fitting   *
  * and moment-magnitude computation (Lars Ottemoeller).                    *
  *                                                                         *
+ * Copyright (C) 2026 Mustafa Comoglu (Geoscience Australia)               *
  * GNU Affero General Public License Usage - see LICENSE.                   *
  ***************************************************************************/
 

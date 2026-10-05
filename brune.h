@@ -10,6 +10,7 @@
  *   LIB/spec_dist.for       - geometric spreading                         *
  *   LIB/libsei.for          - get_att_vel (layered model interpolation)   *
  *                                                                         *
+ * Copyright (C) 2026 Mustafa Comoglu (Geoscience Australia)               *
  * GNU Affero General Public License Usage - see LICENSE.                   *
  ***************************************************************************/
 
@@ -208,7 +209,7 @@ struct MomentResult {
 	double logM0      = 0.0;  //!< log10(M0)
 	double mw         = 0.0;  //!< moment magnitude
 	double sourceRadius = 0.0; //!< Brune source radius [m]
-	double stressDrop = 0.0;  //!< stress drop [Pa]
+	double stressDrop = 0.0;  //!< Brune stress drop [bar] (Seisan convention)
 };
 
 

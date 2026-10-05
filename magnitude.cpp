@@ -5,6 +5,7 @@
  * automag.for. Mw(spec) is itself a moment magnitude, so estimateMw is     *
  * the identity.                                                            *
  *                                                                         *
+ * Copyright (C) 2026 Mustafa Comoglu (Geoscience Australia)               *
  * GNU Affero General Public License Usage - see LICENSE.                   *
  ***************************************************************************/
 
@@ -12,9 +13,11 @@
 #define SEISCOMP_COMPONENT MwSpec
 
 #include <seiscomp/logging/log.h>
+#include <seiscomp/datamodel/stationmagnitude.h>
 #include <seiscomp/math/geo.h>
 
 #include "mwspec.h"
+#include "version.h"
 
 
 namespace Seiscomp {
@@ -63,6 +66,8 @@ MagnitudeProcessor_MwSpec::computeMagnitude(
 	const Locale *,
 	double &value) {
 
+	_lastValid = false;
+
 	if ( amplitude <= 0.0 ) {
 		return AmplitudeOutOfRange;
 	}
@@ -109,12 +114,47 @@ MagnitudeProcessor_MwSpec::computeMagnitude(
 
 	value = mr.mw;
 
+	_lastValid = true;
+	_last = mr;
+	_lastCornerFreq = cornerFreq;
+	_lastGeoDistKm = geoDistKm;
+
 	SEISCOMP_DEBUG("%s: Om0=%g nm*s fc=%.3f Hz R=%.1f km v=%.2f rho=%.2f "
 	               "-> log M0=%.2f Mw=%.2f",
 	               type().c_str(), omega0, cornerFreq, geoDistKm,
 	               sp.velocity(_cfg.phase), sp.density, mr.logM0, value);
 
 	return OK;
+}
+
+
+void MagnitudeProcessor_MwSpec::finalizeMagnitude(DataModel::StationMagnitude *magnitude) const {
+	if ( !magnitude ) {
+		return;
+	}
+
+	try {
+		magnitude->creationInfo().setVersion(MWSPEC_VERSION);
+	}
+	catch ( ... ) {
+		DataModel::CreationInfo ci;
+		ci.setVersion(MWSPEC_VERSION);
+		magnitude->setCreationInfo(ci);
+	}
+
+	if ( !_lastValid ) {
+		return;
+	}
+
+	setComment(magnitude, "M0", _last.m0, "%.3e");
+	if ( _lastCornerFreq > 0.0 ) {
+		setComment(magnitude, "fc", _lastCornerFreq);
+		setComment(magnitude, "sourceRadius", _last.sourceRadius, "%.0f");
+		setComment(magnitude, "stressDrop", _last.stressDrop * 0.1, "%.3g");  // bar -> MPa
+	}
+	if ( !_cfg.useAttenTable ) {
+		setComment(magnitude, "geoDistance", _lastGeoDistKm, "%.1f");
+	}
 }
 
 
