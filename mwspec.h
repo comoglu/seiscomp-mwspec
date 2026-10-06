@@ -92,6 +92,21 @@ struct MwSpecConfig {
 	double   maxResidual      = 1.0;     //!< maximum Brune-fit residual to accept
 	double   calibration      = 0.0;     //!< log10 additive level calibration (Seisan match)
 	bool     applyTaper       = true;    //!< cosine taper before the FFT
+
+	//! Where the S signal window starts (amplitudes are triggered on P):
+	//! the associated S pick, else the first theoretical S-type arrival
+	//! (Auto); always theoretical (TravelTime); or the P trigger (Trigger,
+	//! the pre-0.7 behaviour).
+	enum SOnset { SOnsetAuto, SOnsetTravelTime, SOnsetTrigger };
+	SOnset   sOnset           = SOnsetAuto;
+
+	//! S only: the window ends no earlier than the Lg arrival, epicentral
+	//! distance / lgVelocity + lgMargin after the origin time, so that it
+	//! covers Lg at regional distances where the S onset is Sn. 0 = off.
+	//! Applies up to lgMaxDistance (Lg is a regional, continental phase).
+	double   lgVelocity       = 3.0;     //!< [km/s] slowest Lg group velocity
+	double   lgMargin         = 10.0;    //!< [s] after the Lg arrival
+	double   lgMaxDistanceDeg = 20.0;    //!< [deg]
 	BruneFitOptions fit;                  //!< grid-search tunables
 
 	// Optional empirical attenuation table (alternative to the parametric Q +
@@ -121,19 +136,24 @@ bool readMwSpecConfig(const Processing::Settings &settings,
  * and external tools can show them; see the README for the comment ids.
  */
 template <typename T>
-void setComment(T *obj, const std::string &id, double value,
-                const char *fmt = "%.4g") {
-	char buf[64];
-	std::snprintf(buf, sizeof(buf), fmt, value);
+void setComment(T *obj, const std::string &id, const std::string &text) {
 	DataModel::Comment *c = obj->comment(DataModel::CommentIndex(id));
 	if ( c ) {
-		c->setText(buf);
+		c->setText(text);
 		return;
 	}
 	DataModel::CommentPtr nc = new DataModel::Comment;
 	nc->setId(id);
-	nc->setText(buf);
+	nc->setText(text);
 	obj->add(nc.get());
+}
+
+template <typename T>
+void setComment(T *obj, const std::string &id, double value,
+                const char *fmt = "%.4g") {
+	char buf[64];
+	std::snprintf(buf, sizeof(buf), fmt, value);
+	setComment(obj, id, std::string(buf));
 }
 
 
@@ -196,10 +216,22 @@ class SC_SYSTEM_CLIENT_API AmplitudeProcessor_MwSpec : public Processing::Amplit
 
 	private:
 		void applyConfig();
+		//! Sets the trigger-relative signal/noise windows (signal shifted by
+		//! _signalShift). Unlike applyConfig() it leaves the component alone,
+		//! which the combiner assigns per worker.
+		void applyWindows();
+		//! S only: seconds from the trigger (P) to the S onset, or 0.
+		double sOnsetShift(const DataModel::Origin *hypocenter,
+		                   const DataModel::SensorLocation *receiver,
+		                   const DataModel::Pick *pick);
 
 	private:
 		MwSpecConfig   _cfg;
 		FitDiagnostics _fit;
+
+		double      _signalShift = 0.0;   //!< [s] signal window offset from trigger
+		std::string _onsetSource;         //!< "pick", "ttt" or "trigger" (S only)
+		std::string _dumpDir;             //!< MWSPEC_DUMP_DIR: write spectra as JSON
 
 		// Hypocentre values copied in setEnvironment(). The base class keeps
 		// only a raw Origin pointer, and scamp does not keep a messaging
@@ -208,6 +240,8 @@ class SC_SYSTEM_CLIENT_API AmplitudeProcessor_MwSpec : public Processing::Amplit
 		double          _srcDepthKm = 0.0;
 		OPT(Core::Time) _originTime;
 		double          _rhypKm     = 0.0;   //!< 0 = geometry unavailable
+		double          _epiKm      = 0.0;   //!< epicentral distance, 0 = unknown
+		double          _signalEnd  = 0.0;   //!< [s] S: window end from the trigger, 0 = default
 
 	friend class AmplitudeProcessor_MwSpecCombiner;
 };

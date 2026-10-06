@@ -137,6 +137,36 @@
 					max; min. Ignored for phase = P (vertical only).
 					</description>
 				</parameter>
+				<parameter name="sOnset" type="string" default="auto" values="auto,ttt,trigger">
+					<description>
+					For phase = S only: where the signal window starts.
+					Amplitudes are triggered on the P pick; auto (default) moves
+					the window to this station's earliest S-type pick associated
+					with the origin, else to the first S-type arrival of the
+					travel-time table (amplitudes.ttt.interface/model, default
+					LOCSAT/iasp91); ttt always uses the table; trigger keeps the
+					window at the P onset (behaviour before 0.7). The noise
+					window stays ahead of P, and the Q correction uses the S
+					travel time.
+					</description>
+				</parameter>
+				<parameter name="lgVelocity" type="double" default="3.0" unit="km/s">
+					<description>
+					For phase = S only: the signal window ends no earlier than
+					the Lg arrival, i.e. epicentral distance / lgVelocity +
+					lgMargin after the origin time (the slowest Lg group
+					velocity, typically 3.0-3.2 km/s). At regional distances the
+					S onset is usually Sn and a fixed signalDuration misses Lg
+					beyond ~400 km. The noise window grows with the signal
+					window. 0 disables the extension.
+					</description>
+				</parameter>
+				<parameter name="lgMargin" type="double" default="10" unit="s">
+					<description>Time after the Lg arrival included in the window.</description>
+				</parameter>
+				<parameter name="lgMaxDistance" type="double" default="20" unit="deg">
+					<description>Epicentral distance up to which the Lg extension applies.</description>
+				</parameter>
 				<parameter name="kappaP" type="double" default="0.01" unit="s">
 					<description>Near-surface attenuation kappa for P.</description>
 				</parameter>

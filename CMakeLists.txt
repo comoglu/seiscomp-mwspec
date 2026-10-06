@@ -26,3 +26,8 @@ INSTALL(FILES ${descs} DESTINATION ${SC3_PACKAGE_APP_DESC_DIR})
 IF(SC_GLOBAL_UNITTESTS)
 	SUBDIRS(test)
 ENDIF(SC_GLOBAL_UNITTESTS)
+
+# scolv helpers: origin-panel summary (display.origin.addons) and the
+# spectrum viewer (olv.commandMenuAction), next to the other scolv scripts.
+INSTALL(PROGRAMS tools/mwspec_summary.py tools/mwspec_viewer.py
+        DESTINATION ${SC3_PACKAGE_SHARE_DIR}/client)

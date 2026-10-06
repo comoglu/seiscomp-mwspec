@@ -10,7 +10,7 @@ scaled from mB/Mwp or derived from a full moment-tensor inversion).
 Registers an amplitude processor and a magnitude processor of type
 **`Mw(spec)`** with `scamp` / `scmag` / `scolv`.
 
-> **Status:** v0.6.0. P (vertical) and S (N+E vector-sum) phases; configurable
+> **Status:** v0.7.0. P (vertical) and S (N+E vector-sum) phases; configurable
 > velocity/Q/density model, distance gate, per-station corrections and
 > calibration. The displacement spectrum is **bit-validated against Seisan's own
 > `spectrum()` routine** (×1.000 over a population of real channels), and the
@@ -81,6 +81,7 @@ database/QuakeML and can be shown in scolv or by scripts. Comment ids:
 | Amplitude | `fitResidual` | — | Brune-fit misfit (gate: `maxResidual`) |
 | Amplitude | `deltaKappa` | s | fitted Δκ (only when the dkappa search is on) |
 | Amplitude | `travelTime` | s | travel time used for the Q correction (Q mode only) |
+| Amplitude | `sOnset` | — | S only: window anchor `pick`, `ttt` or `trigger` |
 | StationMagnitude | `M0` | N·m | seismic moment |
 | StationMagnitude | `fc` | Hz | corner frequency |
 | StationMagnitude | `sourceRadius` | m | Brune radius 0.37·c/fc |
@@ -91,6 +92,36 @@ For S the per-component values carry a `.N` / `.E` suffix (`Om0.N`, `fc.E`, …)
 the unsuffixed `fc` is the combined value the magnitude uses. The amplitude
 `methodID` is `Brune/<phase>/<Q|table>`, and `creationInfo.version` is the
 plugin version.
+
+## scolv integration
+`make install` puts two scripts in `share/client/` (source in `tools/`):
+
+**Origin panel summary** — one line per origin, e.g.
+`Mw(spec) 3.80 (17 sta) · fc 4.1 Hz · Δσ 13 MPa [0.96–96] · M0 6.26e+14 N·m`
+(medians over the contributing stations, Δσ with its interquartile range):
+```
+display.origin.addons = mwspec
+display.origin.addon.mwspec.label = Mw(spec)
+display.origin.addon.mwspec.script = @DATADIR@/client/mwspec_summary.py
+```
+It uses the station magnitudes scolv passes with the origin when they carry
+the plugin comments (freshly computed), otherwise those in the database.
+
+**Spectrum viewer** — a popup with a station table and, per station, the
+spectra the plugin fitted: corrected and raw displacement spectrum, pre-P
+noise, Brune model, fitted band and fc (rejected stations show why):
+```
+olv.commandMenuAction.mwspec.enable = true
+olv.commandMenuAction.mwspec.command = @DATADIR@/client/mwspec_viewer.py
+olv.commandMenuAction.mwspec.showProcess = true
+olv.commandMenuAction.mwspec.text = "Mw(spec) spectra"
+olv.commandMenuAction.mwspec.toolTip = "Mw(spec) spectral fits per station"
+```
+It recomputes the origin (must be in the database) with the installed plugin
+— scamp and scmag offline, Mw(spec) only — using scolv's `recordstream`
+(override: `-I <url>`), and plots the spectra the plugin writes when
+`MWSPEC_DUMP_DIR` is set, so the plot is exactly what was fitted. Without a
+GUI: `mwspec_viewer.py <originID> --png out.png`.
 
 ## Preparing for reliable Mw
 Spectral Mw needs the right inputs (a regionally-calibrated Q, curated stations,
@@ -108,10 +139,23 @@ full checklist and the exact config keys (`Q0`/`Qalpha`/`vp`/`vs`/`density`,
   (default `vector_sum` = sqrt(N²+E²), the total horizontal S motion). P uses the
   vertical only. The registered processor is a component combiner that runs one
   worker (P) or two (S); see `combiner.cpp`.
-- **S window**: amplitudes are triggered on the P pick, so the S signal window
-  (`signalPreTime`/`signalDuration`) currently starts at the P onset, and the Q
-  correction uses the P travel time. Choose `signalDuration` to cover the S
-  arrival at your distances.
+- **S window**: amplitudes are triggered on the P pick. For S the signal window
+  (`signalPreTime`/`signalDuration`) is moved to the S onset — this station's
+  earliest S-type pick associated with the origin, else the first S-type
+  arrival of the travel-time table (`amplitudes.ttt.interface`/`model`, default
+  LOCSAT/iasp91). The noise window stays ahead of P and the Q correction uses
+  the S travel time. `amplitudes.Mw(spec).sOnset = auto | ttt | trigger`
+  (`trigger` = the window at P, as before 0.7).
+- **Lg at regional distances**: the earliest S is usually Sn, and a fixed
+  window misses Lg beyond ~400 km. For S the window therefore ends no earlier
+  than the Lg arrival, distance / `lgVelocity` + `lgMargin` (defaults
+  3.0 km/s, 10 s; up to `lgMaxDistance` = 20°; `lgVelocity = 0` turns it off).
+  On 202 Australian events (S, 4.3k station magnitudes) this left stations
+  < 300 km unchanged, raised stations at 450–1000 km by +0.2–0.27 (Lg was
+  missed), kept station residuals within ±0.07 out to 1000 km (≈ +0.1 beyond),
+  added ~⅓ more usable stations and moved network Mw − GA Mw from −0.27 to
+  −0.06. Starting the window at a fast Lg velocity (3.6 km/s) instead of the
+  S onset was tested and was worse.
 - Important implementation detail: SeisComP's `deconvolveFFT` removes only the
   normalised response *shape* — the processor divides out the sensitivity (gain)
   itself, as `ML`/`MN`/`A5_2` do.

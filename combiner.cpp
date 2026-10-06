@@ -496,7 +496,7 @@ void AmplitudeProcessor_MwSpecCombiner::finalizeAmplitude(DataModel::Amplitude *
 	// per-component values plus the corner frequency that the magnitude uses
 	// (the inverse of the combined period).
 	for ( const char *id : {"Om0", "fc", "fmin", "fmax", "fitResidual",
-	                        "deltaKappa", "travelTime"} ) {
+	                        "deltaKappa", "travelTime", "sOnset"} ) {
 		amplitude->removeComment(DataModel::CommentIndex(id));
 	}
 	_c0.writeDiagnostics(amplitude, ".N");

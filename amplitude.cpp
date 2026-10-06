@@ -18,15 +18,21 @@
 #include <seiscomp/logging/log.h>
 #include <seiscomp/core/datetime.h>
 #include <seiscomp/datamodel/amplitude.h>
+#include <seiscomp/datamodel/arrival.h>
 #include <seiscomp/datamodel/origin.h>
+#include <seiscomp/datamodel/pick.h>
 #include <seiscomp/datamodel/sensorlocation.h>
 #include <seiscomp/math/fft.h>
 #include <seiscomp/math/geo.h>
 #include <seiscomp/math/mean.h>
 #include <seiscomp/math/windows/cosine.h>
+#include <seiscomp/seismology/ttt.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
+#include <fstream>
 #include <vector>
 
 #include "mwspec.h"
@@ -159,7 +165,57 @@ double logLogInterp(const std::vector<double> &freq,
 	return la0 + t * (la1 - la0);
 }
 
+
+void writeArray(std::ostream &os, const char *name, const std::vector<double> &v) {
+	os << "\"" << name << "\":[";
+	for ( size_t i = 0; i < v.size(); ++i ) {
+		os << (i ? "," : "") << (std::isfinite(v[i]) ? v[i] : -30.0);
+	}
+	os << "]";
+}
+
 }  // namespace
+
+
+/**
+ * Everything the spectrum viewer needs about one measurement. Written as
+ * JSON to $MWSPEC_DUMP_DIR when the measurement ends, also when it is
+ * rejected (status says why). Log arrays include the Q/kappa correction and
+ * `calibration` but not the gain: subtract log10(gain) for nm*s.
+ */
+struct SpectrumDump {
+	std::string path;
+	std::string stream, phase, onset, status = "error";
+	std::string signalBegin, signalEnd, noiseBegin, noiseEnd;
+	double gain = 0, calibration = 0, travelTime = 0;
+	std::vector<double> freq, logSig, logNoise, logCorr;
+	bool   fitted = false;
+	double om0Log10 = 0, fc = 0, fmin = 0, fmax = 0, residual = 0, snrLog10 = 0;
+
+	~SpectrumDump() {
+		if ( path.empty() ) {
+			return;
+		}
+		std::ofstream os(path);
+		os.precision(7);
+		os << "{\"stream\":\"" << stream << "\",\"phase\":\"" << phase
+		   << "\",\"onset\":\"" << onset << "\",\"status\":\"" << status
+		   << "\",\"signalWindow\":[\"" << signalBegin << "\",\"" << signalEnd
+		   << "\"],\"noiseWindow\":[\"" << noiseBegin << "\",\"" << noiseEnd
+		   << "\"],\"gain\":" << gain << ",\"calibration\":" << calibration
+		   << ",\"travelTime\":" << travelTime << ",";
+		writeArray(os, "freq", freq); os << ",";
+		writeArray(os, "logSig", logSig); os << ",";
+		writeArray(os, "logNoise", logNoise); os << ",";
+		writeArray(os, "logCorr", logCorr);
+		if ( fitted ) {
+			os << ",\"fit\":{\"om0Log10\":" << om0Log10 << ",\"fc\":" << fc
+			   << ",\"fmin\":" << fmin << ",\"fmax\":" << fmax
+			   << ",\"residual\":" << residual << ",\"snrLog10\":" << snrLog10 << "}";
+		}
+		os << "}\n";
+	}
+};
 
 
 // ---------------------------------------------------------------------------
@@ -180,6 +236,10 @@ AmplitudeProcessor_MwSpec::AmplitudeProcessor_MwSpec()
 	setMinDist(0);
 	setMaxDist(180);
 
+	if ( const char *dir = std::getenv("MWSPEC_DUMP_DIR") ) {
+		_dumpDir = dir;
+	}
+
 	applyConfig();
 }
 
@@ -187,18 +247,103 @@ AmplitudeProcessor_MwSpec::AmplitudeProcessor_MwSpec()
 void AmplitudeProcessor_MwSpec::applyConfig() {
 	// Component depends on the phase: P on the vertical, S on a horizontal.
 	setUsedComponent(_cfg.phase == 'S' ? FirstHorizontal : Vertical);
+	applyWindows();
+}
 
+
+void AmplitudeProcessor_MwSpec::applyWindows() {
 	// Trigger-relative windows. The noise window has the same length as the
-	// signal window and sits ahead of it, separated by noiseGap.
+	// signal window and ends noiseGap before the phase onset at the trigger;
+	// for S it therefore stays ahead of P while the signal moves to S.
 	const double sigStart = -_cfg.signalPreTime;
-	const double sigEnd   = _cfg.signalDuration;
+	const double sigEnd   = std::max(_cfg.signalDuration, _signalEnd - _signalShift);
 	const double noiEnd   = sigStart - _cfg.noiseGap;
-	const double noiStart = noiEnd - (_cfg.signalDuration + _cfg.signalPreTime);
+	const double noiStart = noiEnd - (sigEnd - sigStart);
 
-	setSignalStart(sigStart);
-	setSignalEnd(sigEnd);
+	setSignalStart(_signalShift + sigStart);
+	setSignalEnd(_signalShift + sigEnd);
 	setNoiseStart(noiStart);
 	setNoiseEnd(noiEnd);
+}
+
+
+double AmplitudeProcessor_MwSpec::sOnsetShift(const DataModel::Origin *hypocenter,
+                                              const DataModel::SensorLocation *receiver,
+                                              const DataModel::Pick *pick) {
+	_onsetSource.clear();
+	if ( _cfg.phase != 'S' ) {
+		return 0.0;
+	}
+	if ( _cfg.sOnset == MwSpecConfig::SOnsetTrigger || !_trigger || !hypocenter ) {
+		_onsetSource = "trigger";
+		return 0.0;
+	}
+
+	// 1. The earliest S-type pick of this station associated with the origin.
+	if ( _cfg.sOnset == MwSpecConfig::SOnsetAuto && pick ) {
+		const auto &wid = pick->waveformID();
+		OPT(Core::Time) best;
+		for ( size_t i = 0; i < hypocenter->arrivalCount(); ++i ) {
+			const DataModel::Arrival *arr = hypocenter->arrival(i);
+			std::string phase;
+			try { phase = arr->phase().code(); }
+			catch ( ... ) { continue; }
+			if ( phase.empty() || ::toupper(phase[0]) != 'S' ) {
+				continue;
+			}
+			const DataModel::Pick *sp = DataModel::Pick::Find(arr->pickID());
+			if ( !sp || sp->waveformID().networkCode() != wid.networkCode() ||
+			     sp->waveformID().stationCode() != wid.stationCode() ) {
+				continue;
+			}
+			try {
+				const Core::Time t = sp->time().value();
+				if ( !best || t < *best ) {
+					best = t;
+				}
+			}
+			catch ( ... ) {}
+		}
+		if ( best ) {
+			_onsetSource = "pick";
+			return (*best - *_trigger).length();
+		}
+	}
+
+	// 2. The first S-type phase of the travel-time table, configured as for
+	//    the SeisComP amplitude time-window expressions.
+	if ( receiver ) {
+		try {
+			TravelTimeTableInterfacePtr ttt = TravelTimeTableInterfaceFactory::Create(
+				config().ttInterface.empty() ? "LOCSAT" : config().ttInterface.c_str());
+			if ( ttt && ttt->setModel(config().ttModel.empty() ? "iasp91" : config().ttModel) ) {
+				double elev = 0.0;
+				try { elev = receiver->elevation(); }
+				catch ( ... ) {}
+				TravelTimeList *tts = ttt->compute(
+					hypocenter->latitude().value(), hypocenter->longitude().value(),
+					_srcDepthKm, receiver->latitude(), receiver->longitude(), elev);
+				if ( tts ) {
+					tts->sortByTime();
+					for ( const auto &tt : *tts ) {
+						if ( !tt.phase.empty() && tt.phase[0] == 'S' ) {
+							const Core::Time onset = *_originTime + Core::TimeSpan(tt.time);
+							delete tts;
+							_onsetSource = "ttt";
+							return (onset - *_trigger).length();
+						}
+					}
+					delete tts;
+				}
+			}
+		}
+		catch ( std::exception &e ) {
+			SEISCOMP_WARNING("%s: S travel time failed: %s", type().c_str(), e.what());
+		}
+	}
+
+	_onsetSource = "trigger";
+	return 0.0;
 }
 
 
@@ -253,8 +398,13 @@ void AmplitudeProcessor_MwSpec::setEnvironment(
 	_srcDepthKm = 0.0;
 	_originTime = Core::None;
 	_rhypKm = 0.0;
+	_signalShift = 0.0;
+	_signalEnd = 0.0;
+	_epiKm = 0.0;
+	_onsetSource.clear();
 
 	if ( !hypocenter ) {
+		applyWindows();
 		return;
 	}
 
@@ -270,11 +420,25 @@ void AmplitudeProcessor_MwSpec::setEnvironment(
 			                  hypocenter->longitude().value(),
 			                  receiver->latitude(), receiver->longitude(),
 			                  &dDeg, &az, &baz);
-			const double epiKm = Math::Geo::deg2km(dDeg);
-			_rhypKm = std::sqrt(epiKm * epiKm + _srcDepthKm * _srcDepthKm);
+			_epiKm = Math::Geo::deg2km(dDeg);
+			_rhypKm = std::sqrt(_epiKm * _epiKm + _srcDepthKm * _srcDepthKm);
 		}
 		catch ( ... ) {}
 	}
+
+	// Move the S signal window to the S onset (needs the trigger, which
+	// scamp and scolv set before the environment).
+	_signalShift = _originTime ? sOnsetShift(hypocenter, receiver, pick) : 0.0;
+
+	// S at regional distances: make the window reach past the Lg arrival.
+	if ( _cfg.phase == 'S' && _cfg.lgVelocity > 0.0 && _epiKm > 0.0 &&
+	     _originTime && _trigger &&
+	     Math::Geo::km2deg(_epiKm) <= _cfg.lgMaxDistanceDeg ) {
+		const Core::Time lgEnd = *_originTime +
+			Core::TimeSpan(_epiKm / _cfg.lgVelocity + _cfg.lgMargin);
+		_signalEnd = (lgEnd - *_trigger).length();
+	}
+	applyWindows();
 }
 
 
@@ -294,6 +458,9 @@ void AmplitudeProcessor_MwSpec::writeDiagnostics(DataModel::Amplitude *amplitude
 	}
 	if ( !_cfg.useAttenTable ) {
 		setComment(amplitude, "travelTime" + suffix, _fit.travelTime, "%.2f");
+	}
+	if ( !_onsetSource.empty() ) {
+		setComment(amplitude, "sOnset" + suffix, _onsetSource);
 	}
 }
 
@@ -368,14 +535,41 @@ bool AmplitudeProcessor_MwSpec::computeAmplitude(
 	const int sigStart = static_cast<int>(i1);
 	const int sigEnd   = static_cast<int>(i2);
 	const int nsig     = sigEnd - sigStart;
+
+	const Core::Time dataStart = dataTimeWindow().startTime();
+	auto timeAt = [&](int idx) {
+		return (dataStart + Core::TimeSpan(idx / fsamp)).iso();
+	};
+
+	SpectrumDump dump;
+	if ( !_dumpDir.empty() ) {
+		dump.stream = _environment.networkCode + "." + _environment.stationCode + "." +
+		              _environment.locationCode + "." +
+		              _streamConfig[targetComponent()].code();
+		dump.path = _dumpDir + "/" + dump.stream + ".json";
+		dump.phase = std::string(1, _cfg.phase);
+		dump.onset = _onsetSource;
+		dump.gain = _streamConfig[targetComponent()].gain;
+		dump.calibration = _cfg.calibration;
+	}
+
 	if ( nsig < 16 || sigStart < 0 || sigEnd > dataSize ) {
 		setStatus(Error, 2);
+		dump.status = "signal window incomplete";
 		return false;
 	}
 
-	// Noise: same length, ending noiseGap before the signal window.
-	const int gap = static_cast<int>(_cfg.noiseGap * fsamp);
-	int noiEnd   = sigStart - gap;
+	// Noise: same length as the signal, ending noiseGap before the phase
+	// onset. Without a signal shift that is just ahead of the signal window;
+	// an S window moved to the S onset keeps its noise ahead of P.
+	int noiEnd;
+	if ( _signalShift == 0.0 ) {
+		noiEnd = sigStart - static_cast<int>(_cfg.noiseGap * fsamp);
+	}
+	else {
+		const double dt0 = (*_trigger - dataStart).length();
+		noiEnd = static_cast<int>((dt0 + config().noiseEnd) * fsamp + 0.5);
+	}
 	int noiStart = noiEnd - nsig;
 	if ( noiStart < 0 ) {
 		noiStart = 0;
@@ -383,11 +577,19 @@ bool AmplitudeProcessor_MwSpec::computeAmplitude(
 	const int nnoise = noiEnd - noiStart;
 	const bool haveNoise = (nnoise >= 16 && noiEnd <= dataSize && noiEnd > noiStart);
 
+	dump.signalBegin = timeAt(sigStart);
+	dump.signalEnd = timeAt(sigEnd);
+	if ( haveNoise ) {
+		dump.noiseBegin = timeAt(noiStart);
+		dump.noiseEnd = timeAt(noiEnd);
+	}
+
 	// --- spectra ----------------------------------------------------------
 	std::vector<double> sFreq, sAmp, nFreq, nAmp;
 	if ( !displacementSpectrum(data.typedData() + sigStart, nsig, fsamp,
 	                           _cfg.applyTaper, sFreq, sAmp) ) {
 		setStatus(Error, 3);
+		dump.status = "spectrum failed";
 		return false;
 	}
 	if ( haveNoise ) {
@@ -397,13 +599,15 @@ bool AmplitudeProcessor_MwSpec::computeAmplitude(
 
 	// --- source/attenuation parameters at the hypocentre ------------------
 	// Values were copied in setEnvironment(); the Origin itself may be gone.
+	// The travel time of the analysed phase (P: the trigger; S: its onset).
 	double travelTime = 0.0;
 	if ( _originTime && _trigger ) {
-		travelTime = (*_trigger - *_originTime).length();
+		travelTime = (*_trigger - *_originTime).length() + _signalShift;
 	}
 	if ( travelTime < 0.0 ) {
 		travelTime = 0.0;
 	}
+	dump.travelTime = travelTime;
 
 	const SourceParams sp = _cfg.model.paramsAt(_srcDepthKm, _cfg.phase);
 
@@ -412,6 +616,7 @@ bool AmplitudeProcessor_MwSpec::computeAmplitude(
 	const double rhyp = _rhypKm;
 	if ( _cfg.useAttenTable && rhyp <= 0.0 ) {
 		setStatus(Error, 7);   // need geometry for the attenuation table
+		dump.status = "no geometry for the attenuation table";
 		return false;
 	}
 
@@ -425,11 +630,12 @@ bool AmplitudeProcessor_MwSpec::computeAmplitude(
 	}
 	if ( fhigh <= flow ) {
 		setStatus(Error, 4);
+		dump.status = "empty frequency range";
 		return false;
 	}
 
 	const int nf = _cfg.nfreq;
-	std::vector<double> farray(nf), logSig(nf), logNoise(nf);
+	std::vector<double> farray(nf), logSig(nf), logNoise(nf), logCorr(nf);
 	const double llow = std::log10(flow);
 	const double lhigh = std::log10(fhigh);
 
@@ -461,6 +667,7 @@ bool AmplitudeProcessor_MwSpec::computeAmplitude(
 			}
 		}
 
+		logCorr[i] = corrLog10;
 		logSig[i] = logLogInterp(sFreq, sAmp, f) + corrLog10 + _cfg.calibration;
 
 		if ( haveNoise && !nFreq.empty() ) {
@@ -469,6 +676,13 @@ bool AmplitudeProcessor_MwSpec::computeAmplitude(
 		else {
 			logNoise[i] = -30.0;  // no noise estimate -> effectively infinite S/N
 		}
+	}
+
+	if ( !dump.path.empty() ) {
+		dump.freq = farray;
+		dump.logSig = logSig;
+		dump.logNoise = logNoise;
+		dump.logCorr = logCorr;
 	}
 
 	// --- frequency band ---------------------------------------------------
@@ -482,6 +696,7 @@ bool AmplitudeProcessor_MwSpec::computeAmplitude(
 		SNBand band = selectSNBand(farray, logSig, logNoise);
 		if ( !band.ok ) {
 			setStatus(LowSNR, 0);
+			dump.status = "no usable S/N band";
 			return false;
 		}
 		fmin = band.fmin;
@@ -493,16 +708,28 @@ bool AmplitudeProcessor_MwSpec::computeAmplitude(
 	BruneFit fit = bruneGridSearch(farray, logSig, fmin, fmax, _cfg.fit);
 	if ( !fit.ok ) {
 		setStatus(Error, 5);
+		dump.status = "Brune fit failed";
 		return false;
 	}
+
+	dump.fitted = true;
+	dump.om0Log10 = fit.omega0Log10;
+	dump.fc = fit.cornerFreq;
+	dump.fmin = fmin;
+	dump.fmax = fmax;
+	dump.residual = fit.residual;
+	dump.snrLog10 = snrLog10;
+
 	if ( fit.cornerFreq <= 0.0 || fit.residual > _cfg.maxResidual ) {
 		setStatus(Error, 6);
+		dump.status = "fit residual above maxResidual";
 		return false;
 	}
 
 	const double snrLinear = std::pow(10.0, snrLog10);
 	if ( _cfg.minSNR > 0.0 && snrLinear < _cfg.minSNR ) {
 		setStatus(LowSNR, snrLinear);
+		dump.status = "SNR below minSNR";
 		return false;
 	}
 
@@ -514,8 +741,10 @@ bool AmplitudeProcessor_MwSpec::computeAmplitude(
 	const double gain = std::fabs(_streamConfig[targetComponent()].gain);
 	if ( gain == 0.0 ) {
 		setStatus(MissingGain, 0);
+		dump.status = "missing gain";
 		return false;
 	}
+	dump.status = "ok";
 
 	// Omega0 (linear flat level) in nm*s, in true ground-displacement units.
 	amplitude->value = std::pow(10.0, fit.omega0Log10) / gain;

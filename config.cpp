@@ -271,6 +271,24 @@ bool readMwSpecConfig(const Processing::Settings &settings,
 	settings.getValue(out.calibration,    prefix + ".calibration");
 	settings.getValue(out.applyTaper,     prefix + ".taper");
 
+	settings.getValue(out.lgVelocity,       prefix + ".lgVelocity");
+	settings.getValue(out.lgMargin,         prefix + ".lgMargin");
+	settings.getValue(out.lgMaxDistanceDeg, prefix + ".lgMaxDistance");
+
+	{
+		std::string onset;
+		if ( settings.getValue(onset, prefix + ".sOnset") && !onset.empty() ) {
+			if ( onset == "auto" )         out.sOnset = MwSpecConfig::SOnsetAuto;
+			else if ( onset == "ttt" )     out.sOnset = MwSpecConfig::SOnsetTravelTime;
+			else if ( onset == "trigger" ) out.sOnset = MwSpecConfig::SOnsetTrigger;
+			else {
+				SEISCOMP_ERROR("%s.sOnset: unknown '%s' (use auto|ttt|trigger)",
+				               prefix.c_str(), onset.c_str());
+				return false;
+			}
+		}
+	}
+
 	// --- grid search tunables --------------------------------------------
 	settings.getValue(out.fit.ngridF,  prefix + ".gridF");
 	settings.getValue(out.fit.ngridOm, prefix + ".gridOm");
