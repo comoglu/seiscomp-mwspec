@@ -19,6 +19,13 @@
 #include <seiscomp/processing/amplitudeprocessor.h>
 #include <seiscomp/processing/magnitudeprocessor.h>
 
+// Spectral diagnostics for the amplitude review window (SeisComP with the
+// SpectralDiagnosticsProvider interface); without it the plugin builds as before.
+#if __has_include(<seiscomp/processing/spectraldiagnostics.h>)
+#include <seiscomp/processing/spectraldiagnostics.h>
+#define MWSPEC_SPECTRAL_DIAGNOSTICS 1
+#endif
+
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -178,7 +185,11 @@ struct FitDiagnostics {
 //  model and emits Omega0 (flat level, nm*s) with the corner frequency as the
 //  carried "period".
 // ---------------------------------------------------------------------------
-class SC_SYSTEM_CLIENT_API AmplitudeProcessor_MwSpec : public Processing::AmplitudeProcessor {
+class SC_SYSTEM_CLIENT_API AmplitudeProcessor_MwSpec : public Processing::AmplitudeProcessor
+#ifdef MWSPEC_SPECTRAL_DIAGNOSTICS
+                                                     , public Processing::SpectralDiagnosticsProvider
+#endif
+{
 	public:
 		AmplitudeProcessor_MwSpec();
 
@@ -197,6 +208,18 @@ class SC_SYSTEM_CLIENT_API AmplitudeProcessor_MwSpec : public Processing::Amplit
 
 		//! Diagnostics of the last successful fit (valid == false otherwise).
 		const FitDiagnostics &fitDiagnostics() const { return _fit; }
+
+#ifdef MWSPEC_SPECTRAL_DIAGNOSTICS
+		//! Spectra, Brune model, band and fit values of the last measurement
+		//! (also when it was rejected; status says why).
+		const Processing::SpectralDiagnostics *spectralDiagnostics() const override {
+			return &_diag;
+		}
+
+		//! A band set by the user replaces the automatic S/N band selection
+		bool canSetSpectralBand() const override { return true; }
+		bool setSpectralBand(double fmin, double fmax) override;
+#endif
 
 		//! Writes the methodID, version and fit-diagnostic comments.
 		//! @p suffix is appended to the comment ids (e.g. ".N" for S workers).
@@ -228,8 +251,13 @@ class SC_SYSTEM_CLIENT_API AmplitudeProcessor_MwSpec : public Processing::Amplit
 	private:
 		MwSpecConfig   _cfg;
 		FitDiagnostics _fit;
+#ifdef MWSPEC_SPECTRAL_DIAGNOSTICS
+		Processing::SpectralDiagnostics _diag;
+#endif
 
 		double      _signalShift = 0.0;   //!< [s] signal window offset from trigger
+		double      _bandFmin = 0.0;      //!< [Hz] user fit band, 0 = automatic
+		double      _bandFmax = 0.0;      //!< [Hz] user fit band
 		std::string _onsetSource;         //!< "pick", "ttt" or "trigger" (S only)
 		std::string _dumpDir;             //!< MWSPEC_DUMP_DIR: write spectra as JSON
 
@@ -253,7 +281,11 @@ class SC_SYSTEM_CLIENT_API AmplitudeProcessor_MwSpec : public Processing::Amplit
 //  combines their Omega0 (default: vector sum sqrt(N^2 + E^2) = total S-wave
 //  horizontal motion). This is the entry point scamp/scolv instantiates.
 // ---------------------------------------------------------------------------
-class SC_SYSTEM_CLIENT_API AmplitudeProcessor_MwSpecCombiner : public Processing::AmplitudeProcessor {
+class SC_SYSTEM_CLIENT_API AmplitudeProcessor_MwSpecCombiner : public Processing::AmplitudeProcessor
+#ifdef MWSPEC_SPECTRAL_DIAGNOSTICS
+                                                             , public Processing::SpectralDiagnosticsProvider
+#endif
+{
 	public:
 		AmplitudeProcessor_MwSpecCombiner();
 
@@ -281,6 +313,14 @@ class SC_SYSTEM_CLIENT_API AmplitudeProcessor_MwSpecCombiner : public Processing
 		void reprocess(OPT(double) searchBegin, OPT(double) searchEnd) override;
 
 		void finalizeAmplitude(DataModel::Amplitude *amplitude) const override;
+
+#ifdef MWSPEC_SPECTRAL_DIAGNOSTICS
+		//! The diagnostics of the active worker(s), merged for S.
+		const Processing::SpectralDiagnostics *spectralDiagnostics() const override;
+		bool canSetSpectralBand() const override { return true; }
+		//! Sets the band of all active workers
+		bool setSpectralBand(double fmin, double fmax) override;
+#endif
 
 	protected:
 		bool computeAmplitude(const DoubleArray &data,
@@ -318,6 +358,9 @@ class SC_SYSTEM_CLIENT_API AmplitudeProcessor_MwSpecCombiner : public Processing
 		int      _nActive  = 1;                  //!< 1 for P, 2 for S
 		CombineMode _combiner = CombineVectorSum;
 		OPT(ComponentResult) _results[2];
+#ifdef MWSPEC_SPECTRAL_DIAGNOSTICS
+		mutable Processing::SpectralDiagnostics _diag;
+#endif
 };
 
 

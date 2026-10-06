@@ -520,6 +520,55 @@ bool AmplitudeProcessor_MwSpecCombiner::computeAmplitude(
 }
 
 
+#ifdef MWSPEC_SPECTRAL_DIAGNOSTICS
+bool AmplitudeProcessor_MwSpecCombiner::setSpectralBand(double fmin, double fmax) {
+	bool ok = _c0.setSpectralBand(fmin, fmax);
+	if ( _nActive == 2 ) {
+		ok = _c1.setSpectralBand(fmin, fmax) && ok;
+	}
+	return ok;
+}
+
+
+const Processing::SpectralDiagnostics *
+AmplitudeProcessor_MwSpecCombiner::spectralDiagnostics() const {
+	if ( _nActive == 1 ) {
+		return _c0.spectralDiagnostics();
+	}
+
+	// S: both horizontals in one view, parameters suffixed with the
+	// component like the amplitude comments (fc.N, fc.E, ...).
+	_diag.clear();
+	const AmplitudeProcessor_MwSpec *workers[2] = { &_c0, &_c1 };
+	const char *suffix[2] = { ".N", ".E" };
+	std::string status;
+
+	for ( int i = 0; i < 2; ++i ) {
+		const Processing::SpectralDiagnostics *d = workers[i]->spectralDiagnostics();
+		if ( !d || d->empty() ) {
+			continue;
+		}
+
+		_diag.curves.insert(_diag.curves.end(), d->curves.begin(), d->curves.end());
+		_diag.bands.insert(_diag.bands.end(), d->bands.begin(), d->bands.end());
+		_diag.windows.insert(_diag.windows.end(), d->windows.begin(), d->windows.end());
+		for ( auto p : d->parameters ) {
+			p.id += suffix[i];
+			_diag.parameters.push_back(p);
+		}
+
+		if ( !status.empty() ) {
+			status += ", ";
+		}
+		status += std::string(suffix[i] + 1) + ": " + (d->status.empty() ? "?" : d->status);
+	}
+
+	_diag.status = status;
+	return &_diag;
+}
+#endif
+
+
 }
 }
 }

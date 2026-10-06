@@ -180,8 +180,9 @@ void writeArray(std::ostream &os, const char *name, const std::vector<double> &v
 /**
  * Everything the spectrum viewer needs about one measurement. Written as
  * JSON to $MWSPEC_DUMP_DIR when the measurement ends, also when it is
- * rejected (status says why). Log arrays include the Q/kappa correction and
- * `calibration` but not the gain: subtract log10(gain) for nm*s.
+ * rejected (status says why), and kept as the processor's spectral
+ * diagnostics. Log arrays include the Q/kappa correction and `calibration`
+ * but not the gain: subtract log10(gain) for nm*s.
  */
 struct SpectrumDump {
 	std::string path;
@@ -191,8 +192,106 @@ struct SpectrumDump {
 	std::vector<double> freq, logSig, logNoise, logCorr;
 	bool   fitted = false;
 	double om0Log10 = 0, fc = 0, fmin = 0, fmax = 0, residual = 0, snrLog10 = 0;
+	double deltaKappa = 0;
+	bool   manualBand = false;
+	OPT(Core::TimeWindow) signalWindow, noiseWindow;
+#ifdef MWSPEC_SPECTRAL_DIAGNOSTICS
+	Processing::SpectralDiagnostics *diag = nullptr;
+
+	void toDiagnostics(Processing::SpectralDiagnostics &d) const {
+		using Processing::SpectralCurve;
+		using Processing::SpectralParameter;
+
+		d.clear();
+		d.status = status;
+
+		const std::string cha = stream.substr(stream.rfind('.') + 1);
+		const char comp = cha.empty() ? 0 : cha.back();
+
+		if ( signalWindow ) {
+			d.windows.push_back({ SpectralCurve::Signal, comp, *signalWindow });
+		}
+		if ( noiseWindow ) {
+			d.windows.push_back({ SpectralCurve::Noise, comp, *noiseWindow });
+		}
+		const double g = gain != 0 ? std::log10(std::fabs(gain)) : 0.0;
+
+		auto curve = [&](SpectralCurve::Role role, const std::string &label,
+		                 const std::string &unit) {
+			SpectralCurve c;
+			c.role = role;
+			c.label = cha + " " + label;
+			c.component = comp;
+			c.unit = unit;
+			return c;
+		};
+
+		if ( !freq.empty() ) {
+			SpectralCurve sig = curve(SpectralCurve::Signal, "corrected", "nm*s");
+			SpectralCurve raw = curve(SpectralCurve::Other, "raw", "nm*s");
+			SpectralCurve noise = curve(SpectralCurve::Noise, "noise", "nm*s");
+			SpectralCurve corr = curve(SpectralCurve::Correction, "Q/kappa correction", "");
+			for ( size_t i = 0; i < freq.size(); ++i ) {
+				sig.freq.push_back(freq[i]);
+				sig.value.push_back(std::pow(10.0, logSig[i] - g));
+				raw.freq.push_back(freq[i]);
+				raw.value.push_back(std::pow(10.0, logSig[i] - logCorr[i] - calibration - g));
+				if ( logNoise[i] > -29 ) {
+					noise.freq.push_back(freq[i]);
+					noise.value.push_back(std::pow(10.0, logNoise[i] - g));
+				}
+				corr.freq.push_back(freq[i]);
+				corr.value.push_back(std::pow(10.0, logCorr[i]));
+			}
+			d.curves.push_back(std::move(sig));
+			d.curves.push_back(std::move(raw));
+			d.curves.push_back(std::move(noise));
+			d.curves.push_back(std::move(corr));
+		}
+
+		if ( fitted ) {
+			SpectralCurve model = curve(SpectralCurve::Model, "Brune model", "nm*s");
+			for ( double f : freq ) {
+				model.freq.push_back(f);
+				model.value.push_back(std::pow(10.0, om0Log10 - g
+				                               - std::log10(1.0 + (f / fc) * (f / fc))
+				                               - PI * deltaKappa * f));
+			}
+			d.curves.push_back(std::move(model));
+
+			d.bands.emplace_back(fmin, fmax);
+
+			auto param = [&](const std::string &id, double value,
+			                 const std::string &unit, bool marker = false) {
+				SpectralParameter p;
+				p.id = id;
+				p.value = value;
+				p.unit = unit;
+				p.frequencyMarker = marker;
+				d.parameters.push_back(p);
+			};
+
+			if ( manualBand ) {
+				param("manual band", 1, "");
+			}
+			param("Omega0", std::pow(10.0, om0Log10 - g), "nm*s");
+			param("fc", fc, "Hz", true);
+			param("residual", residual, "");
+			param("SNR", std::pow(10.0, snrLog10), "");
+			if ( deltaKappa != 0 ) {
+				param("deltaKappa", deltaKappa, "s");
+			}
+			param("travelTime", travelTime, "s");
+		}
+	}
+#endif
 
 	~SpectrumDump() {
+#ifdef MWSPEC_SPECTRAL_DIAGNOSTICS
+		if ( diag ) {
+			toDiagnostics(*diag);
+		}
+#endif
 		if ( path.empty() ) {
 			return;
 		}
@@ -372,8 +471,30 @@ bool AmplitudeProcessor_MwSpec::setup(const Processing::Settings &settings) {
 }
 
 
+#ifdef MWSPEC_SPECTRAL_DIAGNOSTICS
+bool AmplitudeProcessor_MwSpec::setSpectralBand(double fmin, double fmax) {
+	if ( fmin <= 0.0 ) {
+		_bandFmin = _bandFmax = 0.0;
+		return true;
+	}
+
+	if ( fmax <= fmin ) {
+		return false;
+	}
+
+	_bandFmin = fmin;
+	_bandFmax = fmax;
+	return true;
+}
+#endif
+
+
 int AmplitudeProcessor_MwSpec::capabilities() const {
+#ifdef MWSPEC_SPECTRAL_DIAGNOSTICS
+	return Processing::AmplitudeProcessor::capabilities() | Spectrum;
+#else
 	return Processing::AmplitudeProcessor::capabilities();
+#endif
 }
 
 
@@ -491,14 +612,24 @@ void AmplitudeProcessor_MwSpec::prepareData(DoubleArray &data) {
 	// Validate the metadata required for that here so failures are explicit.
 	const Processing::Stream &sc = _streamConfig[targetComponent()];
 
+#ifdef MWSPEC_SPECTRAL_DIAGNOSTICS
+	_diag.clear();
+#endif
+
 	if ( sc.gain == 0.0 ) {
 		setStatus(MissingGain, 1);
+#ifdef MWSPEC_SPECTRAL_DIAGNOSTICS
+		_diag.status = "missing gain";
+#endif
 		return;
 	}
 
 	SignalUnit unit;
 	if ( !unit.fromString(sc.gainUnit.c_str()) ) {
 		setStatus(IncompatibleUnit, 2);
+#ifdef MWSPEC_SPECTRAL_DIAGNOSTICS
+		_diag.status = "incompatible gain unit " + sc.gainUnit;
+#endif
 		return;
 	}
 
@@ -506,6 +637,9 @@ void AmplitudeProcessor_MwSpec::prepareData(DoubleArray &data) {
 		Processing::Sensor *sensor = sc.sensor();
 		if ( !sensor || !sensor->response() ) {
 			setStatus(MissingResponse, 1);
+#ifdef MWSPEC_SPECTRAL_DIAGNOSTICS
+			_diag.status = "missing response";
+#endif
 			return;
 		}
 	}
@@ -542,16 +676,19 @@ bool AmplitudeProcessor_MwSpec::computeAmplitude(
 	};
 
 	SpectrumDump dump;
+	dump.stream = _environment.networkCode + "." + _environment.stationCode + "." +
+	              _environment.locationCode + "." +
+	              _streamConfig[targetComponent()].code();
 	if ( !_dumpDir.empty() ) {
-		dump.stream = _environment.networkCode + "." + _environment.stationCode + "." +
-		              _environment.locationCode + "." +
-		              _streamConfig[targetComponent()].code();
 		dump.path = _dumpDir + "/" + dump.stream + ".json";
-		dump.phase = std::string(1, _cfg.phase);
-		dump.onset = _onsetSource;
-		dump.gain = _streamConfig[targetComponent()].gain;
-		dump.calibration = _cfg.calibration;
 	}
+	dump.phase = std::string(1, _cfg.phase);
+	dump.onset = _onsetSource;
+	dump.gain = _streamConfig[targetComponent()].gain;
+	dump.calibration = _cfg.calibration;
+#ifdef MWSPEC_SPECTRAL_DIAGNOSTICS
+	dump.diag = &_diag;
+#endif
 
 	if ( nsig < 16 || sigStart < 0 || sigEnd > dataSize ) {
 		setStatus(Error, 2);
@@ -579,9 +716,13 @@ bool AmplitudeProcessor_MwSpec::computeAmplitude(
 
 	dump.signalBegin = timeAt(sigStart);
 	dump.signalEnd = timeAt(sigEnd);
+	dump.signalWindow = Core::TimeWindow(dataStart + Core::TimeSpan(sigStart / fsamp),
+	                                     dataStart + Core::TimeSpan(sigEnd / fsamp));
 	if ( haveNoise ) {
 		dump.noiseBegin = timeAt(noiStart);
 		dump.noiseEnd = timeAt(noiEnd);
+		dump.noiseWindow = Core::TimeWindow(dataStart + Core::TimeSpan(noiStart / fsamp),
+		                                    dataStart + Core::TimeSpan(noiEnd / fsamp));
 	}
 
 	// --- spectra ----------------------------------------------------------
@@ -678,17 +819,34 @@ bool AmplitudeProcessor_MwSpec::computeAmplitude(
 		}
 	}
 
-	if ( !dump.path.empty() ) {
-		dump.freq = farray;
-		dump.logSig = logSig;
-		dump.logNoise = logNoise;
-		dump.logCorr = logCorr;
-	}
+	dump.freq = farray;
+	dump.logSig = logSig;
+	dump.logNoise = logNoise;
+	dump.logCorr = logCorr;
 
 	// --- frequency band ---------------------------------------------------
 	double fmin, fmax;
 	double snrLog10 = 3.0;
-	if ( _cfg.fixedFmin > 0.0 && _cfg.fixedFmax > 0.0 ) {
+	if ( _bandFmin > 0.0 ) {
+		// Band set by the analyst in the review window
+		fmin = std::max(_bandFmin, farray.front());
+		fmax = std::min(_bandFmax, farray.back());
+		if ( fmax <= fmin ) {
+			setStatus(Error, 8);
+			dump.status = "manual band outside the spectrum";
+			return false;
+		}
+		dump.manualBand = true;
+		if ( haveNoise ) {
+			snrLog10 = -30.0;
+			for ( int i = 0; i < nf; ++i ) {
+				if ( farray[i] >= fmin && farray[i] <= fmax ) {
+					snrLog10 = std::max(snrLog10, logSig[i] - logNoise[i]);
+				}
+			}
+		}
+	}
+	else if ( _cfg.fixedFmin > 0.0 && _cfg.fixedFmax > 0.0 ) {
 		fmin = _cfg.fixedFmin;
 		fmax = _cfg.fixedFmax;
 	}
@@ -719,6 +877,7 @@ bool AmplitudeProcessor_MwSpec::computeAmplitude(
 	dump.fmax = fmax;
 	dump.residual = fit.residual;
 	dump.snrLog10 = snrLog10;
+	dump.deltaKappa = fit.deltaKappa;
 
 	if ( fit.cornerFreq <= 0.0 || fit.residual > _cfg.maxResidual ) {
 		setStatus(Error, 6);
