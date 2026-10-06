@@ -14,7 +14,8 @@
 #     olv.commandMenuAction.mwspec.command = @DATADIR@/client/mwspec_viewer.py
 #     olv.commandMenuAction.mwspec.text    = "Mw(spec) spectra"            #
 #                                                                          #
-# Waveforms are read with scolv's recordstream unless -I is given.         #
+# Waveforms are read with the launching scolv's recordstream (its -I, else #
+# its config) unless -I is given here.                                     #
 # Headless check: mwspec_viewer.py <OriginID> --png out.png [--ep x.xml]   #
 #                                                                          #
 # Copyright (C) 2026 Mustafa Comoglu (Geoscience Australia)                #
@@ -70,9 +71,31 @@ class StationResult:
         return ",".join(sorted({d["onset"] for d in self.dumps if d.get("onset")})) or "-"
 
 
+def _parent_args():
+    """argv of the launching process (scolv starts the command directly)."""
+    try:
+        with open(f"/proc/{os.getppid()}/cmdline", "rb") as f:
+            return [a.decode("utf-8", "replace") for a in f.read().split(b"\0") if a]
+    except OSError:
+        return []
+
+
 def scolv_recordstream():
+    """The recordstream of the scolv instance that launched us: its -I /
+    --record-url argument, else the config of that scolv (or its alias)."""
+    name = "scolv"
+    args = _parent_args()
+    if args and os.path.basename(args[0]).startswith("scolv"):
+        name = os.path.basename(args[0])
+        for i, a in enumerate(args[1:], 1):
+            if a in ("-I", "--record-url") and i + 1 < len(args):
+                return args[i + 1]
+            if a.startswith("--record-url="):
+                return a.split("=", 1)[1]
+            if a.startswith("-I") and len(a) > 2:
+                return a[2:]
     cfg = seiscomp.config.Config()
-    seiscomp.system.Environment.Instance().initConfig(cfg, "scolv")
+    seiscomp.system.Environment.Instance().initConfig(cfg, name)
     try:
         return cfg.getString("recordstream")
     except Exception:
